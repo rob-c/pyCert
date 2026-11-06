@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.pycert.refresh</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/you/.local/bin/pycert</string>
+        <string>--config</string>
+        <string>/Users/you/.config/pycert/pycert.toml</string>
+        <string>-q</string>
+        <string>status</string>
+        <string>--refresh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/you/Library/Logs/pycert-refresh.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/you/Library/Logs/pycert-refresh.log</string>
+</dict>
+</plist>

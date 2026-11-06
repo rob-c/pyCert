@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# never commit local configuration, keys or certificates
+pycert.toml
+secrets.json
+*.p12
+*.pfx
+*.key

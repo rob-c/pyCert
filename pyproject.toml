@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycert"
+version = "1.0.0"
+description = "Request, wait for, download and export UK e-Science CA certificates (a CertWizard replacement)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-2.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "pyCert contributors" }]
+keywords = ["x509", "pkcs12", "pki", "certificate", "escience", "certwizard"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Environment :: X11 Applications",
+  "Intended Audience :: System Administrators",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security :: Cryptography",
+  "Topic :: System :: Systems Administration",
+]
+# cryptography is the only mandatory dependency: it is the audited, OpenSSL-backed
+# implementation of every primitive pyCert uses.  The GUI uses tkinter from the
+# standard library, so no extra dependency is needed.
+dependencies = ["cryptography>=44"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+pycert = "pycert.cli:main"
+pycert-gui = "pycert.gui:main"
+
+[project.urls]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pycert = ["data/ca/*.pem"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:pycert.*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RET", "C4", "PT"]
+ignore = [
+  "E501",   # long lines are handled by the formatter
+  "E741",   # `l` is the locality attribute in the CA protocol (OU/L)
+  "SIM105", # contextlib.suppress is not always clearer
+  "PT011",  # pytest.raises(...) without match= is fine in tests
+  "PT006",  # parametrize with a comma-separated string is readable
+  "PT018",  # compound assertions are fine in tests
+]

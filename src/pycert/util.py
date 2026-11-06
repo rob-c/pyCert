@@ -1,0 +1,168 @@
+"""Small shared helpers: atomic file writes, permissions, formatting."""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import os
+import re
+import stat
+import tempfile
+import unicodedata
+from datetime import UTC, datetime
+from pathlib import Path
+
+from .errors import PyCertError
+
+# Directory/file modes used everywhere.  The private key and the PKCS#12 file
+# are only ever readable by the owner; pyCert refuses to write them any other
+# way (unlike the Java client, which left keystore permissions to the default
+# umask).
+DIR_MODE = 0o700
+SECRET_FILE_MODE = 0o600
+PUBLIC_FILE_MODE = 0o644
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def iso(when: datetime | None = None) -> str:
+    return (when or utcnow()).astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso(text: str) -> datetime:
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def format_fingerprint(digest: bytes | str, sep: str = ":") -> str:
+    if isinstance(digest, str):
+        hexstr = digest.replace(":", "").replace(" ", "").lower()
+        if len(hexstr) % 2:
+            raise PyCertError("odd-length fingerprint")
+        digest = bytes.fromhex(hexstr)
+    return sep.join(f"{b:02X}" for b in digest)
+
+
+def normalize_fingerprint(text: str) -> str:
+    return re.sub(r"[^0-9a-fA-F]", "", text).lower()
+
+
+def ensure_dir(path: Path, mode: int = DIR_MODE) -> Path:
+    """Create *path* (and missing parents) with an explicit mode.
+
+    ``Path.mkdir(parents=True)`` applies ``mode`` to the leaf only and is masked
+    by the umask; both are wrong for directories that hold private keys.  Every
+    directory created here gets the requested mode explicitly.
+    """
+    path = Path(path)
+    missing = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:  # pragma: no cover - filesystem root
+            break
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=mode)
+        with contextlib.suppress(OSError):
+            os.chmod(directory, mode)
+    with contextlib.suppress(OSError):
+        os.chmod(path, mode)
+    return path
+
+
+def atomic_write(path: Path, data: bytes | str, mode: int = SECRET_FILE_MODE) -> Path:
+    """Write *path* atomically with explicit permissions.
+
+    The temporary file is created in the destination directory so that
+    ``os.replace`` is atomic on POSIX.  Contents are never briefly
+    world-readable, and a crash cannot leave a half-written key on disk.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    path = Path(path)
+    ensure_dir(path.parent)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+    return path
+
+
+def read_private_file(path: Path) -> bytes:
+    """Read a file, warning (hard) if its permissions are too permissive."""
+    data = Path(path).read_bytes()
+    check_private_permissions(Path(path))
+    return data
+
+
+def check_private_permissions(path: Path) -> list[str]:
+    """Return a list of warnings about insecure permissions on *path*."""
+    warnings = []
+    try:
+        st = os.stat(path)
+    except OSError:
+        return warnings
+    if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        warnings.append(
+            f"{path} is accessible by group/other (mode {oct(st.st_mode & 0o777)}); "
+            "run: chmod 600 " + str(path)
+        )
+    return warnings
+
+
+def slugify(text: str, max_length: int = 64) -> str:
+    """Filesystem-safe, collision-resistant-ish slug for an alias/CN."""
+    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", normalized).strip("-._").lower()
+    slug = re.sub(r"-{2,}", "-", slug)
+    return (slug or "cert")[:max_length]
+
+
+def human_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    sign = "-" if seconds < 0 else ""
+    seconds = abs(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{sign}{days}d{hours:02d}h"
+    if hours:
+        return f"{sign}{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{sign}{minutes}m{secs:02d}s"
+    return f"{sign}{secs}s"
+
+
+def parse_duration(text: str) -> float:
+    """Parse '30', '30s', '10m', '2h', '7d' into seconds."""
+    text = text.strip().lower()
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([smhdw]?)", text)
+    if not match:
+        raise PyCertError(f"invalid duration: {text!r} (use e.g. 30s, 10m, 2h, 7d)")
+    value = float(match.group(1))
+    return value * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[match.group(2)]
+
+
+def clamp_text(text: str, limit: int = 500) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def safe_chmod(path: Path, mode: int) -> None:
+    with contextlib.suppress(OSError):
+        os.chmod(path, mode)
