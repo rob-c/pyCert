@@ -231,5 +231,7 @@ installed as trusted.
 `sandbox_ca/acme.py` contains the protocol state machine and the TLS listener;
 `sandbox_ca/server.py` starts it through `SandboxCA.start_acme()`.  The tests
 are split between `tests/test_acme_emulation.py` (lifecycle and edge cases),
-`tests/test_acme_matrix.py` (a large routing/JWS/identifier/order matrix) and
-`tests/test_acme_certbot.py` (optional real-certbot integration).
+`tests/test_acme_matrix.py`, `tests/test_acme_deep_matrix.py` (large
+routing/JWS/CSR/HTTP-01 matrices) and `tests/test_acme_certbot.py` (optional
+real-certbot integration). The legacy listener has a separate 1,000-case
+matrix in `tests/test_ca_server_matrix.py`.

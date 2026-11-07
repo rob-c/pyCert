@@ -20,7 +20,7 @@ changes are called out explicitly.
 - [`../tests/test_acme_emulation.py`](../tests/test_acme_emulation.py),
   [`../tests/test_acme_matrix.py`](../tests/test_acme_matrix.py) and
   [`../tests/test_acme_deep_matrix.py`](../tests/test_acme_deep_matrix.py) —
-  the 1,000+ ACME/CA emulation cases and the wider conformance suite.
+  the 2,000+ ACME/CA emulation cases and the wider conformance suite.
 
 ---
 
@@ -46,8 +46,8 @@ This dossier sets out:
    certificate policy;
 4. the security, assurance, operations and audit work that must accompany it;
 5. an incremental migration plan that does not break CertWizard users;
-6. the test evidence already in this repository (5,196 tests at the time of
-   writing, including 1,000+ ACME/CA-emulation cases and a real certbot test);
+6. the test evidence already in this repository (6,196 tests at the time of
+   writing, including 2,000+ ACME/CA-emulation cases and a real certbot test);
 7. concrete certbot/nginx configurations that can be used for a pilot.
 
 The blunt recommendation: **stop making certificate automation require a
@@ -260,7 +260,26 @@ split into the legacy listener (for compatibility) and the ACME endpoint.
 | L17 | Every response is bounded in size and rejects XML entities/DOCTYPE | SHOULD |
 | L18 | Required headers/body are logged without private keys, PINs or passphrases | MUST |
 
-Full details: [`CA_LISTENER.md`](CA_LISTENER.md).
+Full details: [`CA_LISTENER.md`](CA_LISTENER.md). The 1,000-case legacy
+listener emulation matrix is `tests/test_ca_server_matrix.py`.
+
+#### 4.1.1 Requirement traceability
+
+| Requirements | Primary test evidence |
+|---|---|
+| L1–L6 | `tests/test_ca_server_matrix.py` CA info/liveness/header matrix; `tests/test_sandbox_java.py` |
+| L7–L10 | `tests/test_ca_server_matrix.py` CSR and PPPK matrices |
+| L11–L15 | `tests/test_ca_server_matrix.py` status/download/revoke and response-shape matrices |
+| L16–L18 | `tests/test_transport.py`, `tests/test_e2e_listener_faults.py`, `tests/test_e2e_security.py` |
+| A1–A6 | `tests/test_acme_emulation.py`, `tests/test_acme_deep_matrix.py` |
+| A7–A11 | `tests/test_acme_matrix.py`, `tests/test_acme_deep_matrix.py` |
+| A12–A16 | `tests/test_acme_emulation.py` (bad CSR, orderNotReady, revocation) |
+| A18 (durability) | roadmap; sandbox persists CA records but ACME state is in-memory |
+| A19–A20 (production) | roadmap/assurance gate; not claimed by the sandbox |
+
+The matrix is evidence for the reference behaviour, not a substitute for a
+production conformance programme. A production service must still run the
+independent RFC/client/security gates in section 10.2.
 
 ### 4.2 ACME endpoint: MUST/SHOULD
 
@@ -569,7 +588,7 @@ unchanged during the ACME rollout.
 - Add EAB and account-to-RA authorization.
 - Add durable state, audit logging, rate limits and metrics.
 - Run certbot, acme.sh and cert-manager interoperability tests.
-- Run the 1,000+ ACME/CA emulation suite and the legacy parity suite.
+- Run the 2,000+ ACME/CA emulation suite and the legacy parity suite.
 - Publish a pilot guide; recruit 3–5 service owners.
 
 ### Phase 2 — production hardening (6–12 weeks)
@@ -603,8 +622,8 @@ unchanged during the ACME rollout.
 
 ### 10.1 Current evidence in this repository
 
-- **5,196 tests** in the full suite.
-- **1,000+ ACME/CA-emulation cases**, including:
+- **6,196 tests** in the full suite.
+- **2,000+ ACME/CA-emulation cases**, including:
   - routing/method matrix;
   - JWS envelope and algorithm rejection;
   - DNS identifier validation;
@@ -614,6 +633,11 @@ unchanged during the ACME rollout.
   - nonce lifecycle and concurrency;
   - problem documents;
   - CA manual signing and wildcard orders.
+- **1,000 legacy-listener cases** in `tests/test_ca_server_matrix.py`:
+  - CSR XML/PIN/email/version validation;
+  - PPPK host, renewal and revocation challenges;
+  - status lookup, download and revocation modes;
+  - CA info/MOTD/health/header/response-shape matrices.
 - **Real certbot 5.9.0** obtain and revoke test (`tests/test_acme_certbot.py`).
 - Legacy Java/CertWizard vs pyCert wire-parity tests.
 - Python 3.6 compatibility and lint checks.
@@ -766,8 +790,11 @@ Problem bodies must use `application/problem+json`, include a fresh
 # Full test suite
 .venv/bin/pytest -q
 
-# Just the ACME/CA emulation matrix (>1,000 cases)
+# ACME/CA emulation matrices (>1,000 cases)
 .venv/bin/pytest -q tests/test_acme_emulation.py tests/test_acme_matrix.py tests/test_acme_deep_matrix.py
+
+# Legacy listener emulation matrix (1,000 cases)
+.venv/bin/pytest -q tests/test_ca_server_matrix.py
 
 # Optional real certbot
 CERTBOT_BIN=/path/to/certbot .venv/bin/pytest -q tests/test_acme_certbot.py

@@ -1038,7 +1038,10 @@ class MockCA:
 
             # -- handlers --------------------------------------------------
             def _submit_csr(self, body: bytes):
-                root = ET.fromstring(body)
+                try:
+                    root = ET.fromstring(body)
+                except ET.ParseError:
+                    return self._send(202, ca._error_xml("malformed CSR XML"))
                 if root.tag != "CSR":
                     return self._send(202, ca._error_xml("expected a CSR document"))
                 pem = ca._child_text(root, "Request")
@@ -1077,7 +1080,10 @@ class MockCA:
                 return self._send(201, b"")
 
             def _submit_bulk(self, body: bytes):
-                root = ET.fromstring(body)
+                try:
+                    root = ET.fromstring(body)
+                except ET.ParseError:
+                    return self._send(202, ca._error_xml("malformed bulk CSR XML"))
                 if root.tag == "Bulk":
                     csr_element = root.find("CSR")
                     if csr_element is None:
@@ -1176,7 +1182,10 @@ class MockCA:
                 return self._send(201, b"")
 
             def _lookup(self, body: bytes):
-                root = ET.fromstring(body)
+                try:
+                    root = ET.fromstring(body)
+                except ET.ParseError:
+                    return self._send(400, ca._error_xml("malformed PublicKey XML"))
                 if root.tag != "PublicKey":
                     return self._send(400, ca._error_xml("expected PublicKey"))
                 spki = (root.text or "").strip()
@@ -1300,7 +1309,10 @@ class MockCA:
                 return self._send(200, body)
 
             def _revoke(self, body: bytes):
-                root = ET.fromstring(body)
+                try:
+                    root = ET.fromstring(body)
+                except ET.ParseError:
+                    return self._send(400, ca._error_xml("malformed Revoke XML"))
                 if root.tag != "Revoke":
                     return self._send(400, ca._error_xml("expected Revoke"))
                 cert_id = ca._child_text(root, "id")
