@@ -46,7 +46,7 @@ ENDPOINTS = [
     ("request", "/CSR", "request", "none"),
     ("status", "/resources/resource/publickey/pk", "status", "pending"),
     ("download", "/certificate/*", "download", "noinline"),
-    ("renew", "/CSRs", "renew", "issued"),
+    ("renew", "/CSR", "renew", "issued"),
     ("revoke", "/revoke", "revoke", "issued"),
 ]
 

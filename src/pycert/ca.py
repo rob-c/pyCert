@@ -9,7 +9,8 @@ Endpoint                Purpose
 ``GET  /pingservice``   liveness probe (200 OK)
 ``GET  /CA``            CA certificates, RA list, policy
 ``POST /CSR``           new user CSR: XML ``<CSR>`` with PEM, PIN hash, e-mail
-``POST /CSRs``          host CSR / renewal: same XML, PPPK-authenticated
+``POST /CSRs``          host CSR: XML ``<Bulk>``, PPPK-authenticated
+``POST /CSR``           renewal: XML ``<CSR>`` with ``<PublicKey>``, PPPK-authenticated
 ``POST /resources/resource/publickey/pk``
                         status lookup by base64 SubjectPublicKeyInfo
 ``GET  /certificate/<id>``
@@ -415,8 +416,15 @@ class CAClient:
         host_request: bool = False,
         public_key: "str | None" = None,
     ) -> Submission:
-        """Submit a host CSR or a renewal using PPPK client authentication."""
-        url = self.ca.url("bulk")
+        """Submit a host CSR or a renewal using PPPK client authentication.
+
+        CertWizard uses ``/CSRs`` for a host (bulk) request but the same
+        ``/CSR`` resource as a user request for renewal; the renewal is
+        distinguished by ``<PublicKey>`` and the ``PPPK`` header.  Follow that
+        exactly, while the listener also accepts the legacy ``/CSRs`` renewal
+        path.
+        """
+        url = self.ca.url("bulk") if host_request else self.ca.url("csr")
         if host_request:
             body = self._bulk_xml(csr_pem, pin_hash, email, self.ca.version_string)
         else:

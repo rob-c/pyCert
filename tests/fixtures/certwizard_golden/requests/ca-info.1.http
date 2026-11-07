@@ -1,0 +1,9 @@
+GET /CA HTTP/1.1
+Date: ${DATE}
+Accept: */*
+Host: 127.0.0.1:${PORT}
+User-Agent: NGS-CertWizard/2.2.0
+PPPK: this is pppk
+LocalHost: ${LOCALHOST}
+Connection: Keep-Alive
+

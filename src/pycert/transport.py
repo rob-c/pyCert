@@ -561,7 +561,11 @@ class Transport:
         request_headers = [
             ("Host", header_host),
             ("User-Agent", self.config.user_agent or DEFAULT_USER_AGENT),
-            ("Accept", "application/xml, text/xml, */*"),
+            # Match CertWizard's application headers.  Accept-Encoding and
+            # Connection are transport details; pyCert asks for identity so a
+            # compressed response can never bypass the size limit.
+            ("Accept", "*/*"),
+            ("Date", email.utils.formatdate(usegmt=True)),
             ("Accept-Encoding", "identity"),
             ("Connection", "close"),
         ]

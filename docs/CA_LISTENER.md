@@ -241,7 +241,7 @@ authenticating certificate:
   supports only the nonce challenge.
 
 The sandbox accepts renewal on both `/CSR` and `/CSRs` to cover old and new
-clients.
+clients. pyCert follows the current Java client and posts renewal to `/CSR`.
 
 ## 7. PPPK authentication
 

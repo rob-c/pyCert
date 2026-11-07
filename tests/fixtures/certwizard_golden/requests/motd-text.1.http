@@ -1,0 +1,8 @@
+GET /CA/motd/text HTTP/1.1
+Date: ${DATE}
+Accept: */*
+Host: 127.0.0.1:${PORT}
+User-Agent: NGS-CertWizard/2.2.0
+LocalHost: ${LOCALHOST}
+Connection: Keep-Alive
+

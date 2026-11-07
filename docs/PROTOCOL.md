@@ -11,8 +11,9 @@ sandbox), see [CA_LISTENER.md](CA_LISTENER.md).
 
 * HTTPS to `ca.base_url` (default `https://cwiz-live.ca.ngs.ac.uk:443`).
 * HTTP/1.1, `Connection: close`, XML request and response bodies.
-* Every request carries `LocalHost: <canonical hostname>` and
-  `User-Agent: <ca.user_agent>`.
+* Every request carries `LocalHost: <canonical hostname>`, `Date: <RFC 1123>`
+  and `Accept: */*` (matching CertWizard); `User-Agent: <ca.user_agent>` is
+  client identity and may differ.
 * Authenticated requests also carry `PPPK: this is pppk`.
 * The live server’s certificate chains to `CN=UK e-Science CA 2B`, which chains
   to `CN=UK e-Science Root`; both are in the bundled chain.
@@ -107,9 +108,9 @@ user requests; a mismatch comes back as a 202 with a message.
 
 ### `POST /CSRs` (host; legacy renewal)
 
-pyCert itself posts renewals to `/CSRs`; current Java CertWizard posts them to
-`/CSR` with the `PPPK` header. A listener should accept both. The request
-shapes below are the same on either path.
+pyCert now follows current Java CertWizard and posts renewals to `/CSR`
+with the `PPPK` header. Older clients used `/CSRs`; a listener should accept
+both. The request shapes below are the same on either path.
 
 Two request shapes, both requiring PPPK client authentication:
 

@@ -1,0 +1,19 @@
+POST /CSRs HTTP/1.1
+Date: ${DATE}
+Content-Type: application/xml; charset=UTF-8
+Accept: */*
+Host: 127.0.0.1:${PORT}
+User-Agent: NGS-CertWizard/2.2.0
+PPPK: this is pppk
+LocalHost: ${LOCALHOST}
+keyid: df9382060cbaba4b6829590aa4b2043357267a4691e5c7175ff17d8529abd7580ffa6a933443fba08139c8f1c88843e5912ba6a3e7f0af423c0d2ed366a2495a8544f2188ff99d7dd99b2d210f0e7c8fc7daada2f476306a3ed1999654280fe8f37b527efd39a5ee611d5808a7d9063b7f365680659f7868ed262e14b18629b5f887d1651f099bb2e3f9d5e66912d50147676743f1cb76e7c852b84a07a9a6017a357cee9c01b7a0ee9a299ed431f4462bd3b4fa2b7268210e622588c9874ccdedc3d2e35f149b211d9c3d306d97ea7c557500b2339fff58e52e39ce768c4b6dc258c6833ce08ecd8fe7ca3414f56c7f9ec6150acc12e2a6c50995f505919751.10001
+realm: UK e-Science CA
+response: ${PPPK_RESPONSE}
+serial: 4242
+Transfer-Encoding: chunked
+Connection: Keep-Alive
+
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><Bulk><CSR><Request>-----BEGIN CERTIFICATE REQUEST-----
+MIIBhostCSRtestData
+-----END CERTIFICATE REQUEST-----
+</Request><PIN>5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8</PIN><Email>host.admin@example.org</Email><Version>CertWizard 2.2.1</Version></CSR></Bulk>

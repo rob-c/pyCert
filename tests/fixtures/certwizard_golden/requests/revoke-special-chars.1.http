@@ -1,0 +1,13 @@
+POST /revoke HTTP/1.1
+Date: ${DATE}
+Content-Type: application/xml; charset=UTF-8
+Accept: */*
+Host: 127.0.0.1:${PORT}
+User-Agent: NGS-CertWizard/2.2.0
+LocalHost: ${LOCALHOST}
+PPPK: this is pppk
+Transfer-Encoding: chunked
+Connection: Keep-Alive
+
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><Revoke><id>4242</id><reason>Key &lt;compromised&gt; &amp; "stolen" 'laptop' café £€
+second line	end</reason></Revoke>

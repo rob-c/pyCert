@@ -55,7 +55,7 @@ workflow) are about 4,000 lines and can be reviewed end to end in an afternoon.
 | Waiting for signing | user clicks refresh repeatedly | `--wait` / `pycert wait`, exponential jitter, cancellable, exit code 3 on timeout |
 | PIN | SHA-1 hash, entered in a Swing dialog | SHA-1 hash (server requirement), generated once and shown in a modal/GUI |
 | Automation | GUI only | CLI + `--json` + exit codes + cron/launchd examples |
-| Tests | a couple of XML parser tests | 3,170+ tests (3,178 at the last check), including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
+| Tests | a couple of XML parser tests | 3,190+ tests (3,192 at the last check), including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
 | Documentation | `readme.txt` | README, configuration reference, protocol notes, CA-listener contract + Java sandbox, security model, migration guide |
 
 Everything above is verifiable from the sources: the Java template default is in
@@ -96,7 +96,7 @@ picks cryptography 3.3.x automatically.
 The package is validated on Python 3.6.15 with cryptography 3.3.2 in a
 container: install, `pycert selftest`, `init`, `config check`, live `ping`/`ras`
 and `doctor`, plus a full mock-CA request → download → PKCS#12 → renew → revoke
-flow.  The 3,178 test suite itself runs on a modern Python.
+flow.  The 3,192 test suite itself runs on a modern Python.
 
 ---
 
@@ -381,7 +381,7 @@ sandbox for the real Java client are documented in
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # 3,178 tests
+$ make test           # 3,192 tests
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6
 $ make build          # wheel + sdist
@@ -402,6 +402,12 @@ For running the **real Java CertWizard** against a full local CA (persistent
 requests/certificates, RA approve/sign/reject, revocation, browser admin console
 and a Java jar/source patcher), see [`sandbox_ca/README.md`](sandbox_ca/README.md)
 and [`docs/CA_LISTENER.md`](docs/CA_LISTENER.md).
+
+`tests/test_certwizard_wire_parity.py` compares pyCert's captured requests with
+the Java project's golden wire fixtures for every operation.  If
+`CERTWIZARD_JAR` points at a CertWizard jar (or the usual local checkout is
+present), it also runs the real Java client's complete lifecycle against the
+same sandbox CA and compares the two request multisets.
 
 ```
 src/pycert/

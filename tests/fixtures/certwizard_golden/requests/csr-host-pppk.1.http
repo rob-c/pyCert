@@ -1,0 +1,16 @@
+POST /CSRs HTTP/1.1
+Date: ${DATE}
+Content-Type: application/xml; charset=UTF-8
+Accept: */*
+Host: 127.0.0.1:${PORT}
+User-Agent: NGS-CertWizard/2.2.0
+PPPK: this is pppk
+serial: 4242
+LocalHost: ${LOCALHOST}
+Transfer-Encoding: chunked
+Connection: Keep-Alive
+
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><Bulk><CSR><Request>-----BEGIN CERTIFICATE REQUEST-----
+MIIBhostCSRtestData
+-----END CERTIFICATE REQUEST-----
+</Request><PIN>5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8</PIN><Email>host.admin@example.org</Email><Version>CertWizard 2.2.1</Version></CSR></Bulk>

@@ -1,0 +1,11 @@
+POST /resources/resource/publickey/pk HTTP/1.1
+Date: ${DATE}
+Content-Type: application/xml; charset=UTF-8
+Accept: */*
+Host: 127.0.0.1:${PORT}
+User-Agent: NGS-CertWizard/2.2.0
+LocalHost: ${LOCALHOST}
+Transfer-Encoding: chunked
+Connection: Keep-Alive
+
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><PublicKey>MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA35OCBgy6uktoKVkKpLIEM1cmekaR5ccXX/F9hSmr11gP+mqTNEP7oIE5yPHIiEPlkSumo+fwr0I8DS7TZqJJWoVE8hiP+Z192ZstIQ8OfI/H2q2i9HYwaj7RmZZUKA/o83tSfv05pe5hHVgIp9kGO382VoBln3ho7SYuFLGGKbX4h9FlHwmbsuP51eZpEtUBR2dnQ/HLdufIUrhKB6mmAXo1fO6cAbeg7popntQx9EYr07T6K3JoIQ5iJYjJh0zN7cPS418UmyEdnD0wbZfqfFV1ALIzn/9Y5S45znaMS23CWMaDPOCOzY/nyjQU9Wx/nsYVCswS4qbFCZX1BZGXUQIDAQAB</PublicKey>
