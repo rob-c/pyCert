@@ -680,7 +680,10 @@ def _validate_url(url, allow_plaintext):
         raise TransportError("URL must be a string", kind="url", retryable=False)
     if "\r" in url or "\n" in url:
         raise TransportError("URL contains a newline", kind="url", retryable=False)
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise TransportError("invalid URL: %s" % exc, kind="url", retryable=False)
     if parts.scheme not in ("https", "http"):
         raise TransportError("unsupported URL scheme %r" % parts.scheme, kind="url", retryable=False)
     if parts.scheme == "http" and not allow_plaintext:
@@ -696,13 +699,15 @@ def _validate_url(url, allow_plaintext):
     if any(ord(ch) < 0x20 for ch in parts.path + parts.query):
         raise TransportError("URL contains control characters", kind="url", retryable=False)
     try:
-        port = parts.port or (443 if parts.scheme == "https" else 80)
+        port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
     except ValueError as exc:
         raise TransportError("invalid port: %s" % exc, kind="url", retryable=False)
     if not (0 < port < 65536):
         raise TransportError("invalid port", kind="url", retryable=False)
+    host = parts.hostname
+    if not host or any(character.isspace() or ord(character) < 0x20 for character in host):
+        raise TransportError("invalid host name", kind="url", retryable=False)
     try:
-        host = parts.hostname
         ip_address(host)
     except ValueError:
         try:
@@ -721,6 +726,8 @@ def _validate_headers(headers):
             raise ValueError("header names and values must be strings")
         if any(ch in name for ch in "\r\n:") or any(ch in value for ch in "\r\n"):
             raise ValueError("header injection attempt: %r" % name)
+        if any(ord(character) < 0x20 and character != "\t" for character in value) or "\x7f" in value:
+            raise ValueError("header value contains a control character: %r" % name)
         if not name.strip():
             raise ValueError("empty header name")
         try:
@@ -740,9 +747,12 @@ def _idna(host):
 
 def _effective_port(parts):
     try:
-        return parts.port or (443 if parts.scheme == "https" else 80)
+        port = parts.port if parts.port is not None else (443 if parts.scheme == "https" else 80)
     except ValueError as exc:
         raise TransportError("invalid redirect port: %s" % exc, kind="redirect")
+    if not 0 < port < 65536:
+        raise TransportError("invalid redirect port", kind="redirect")
+    return port
 
 
 def _same_host_redirect(current_url, location, allow_plaintext):

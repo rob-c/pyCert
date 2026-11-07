@@ -45,6 +45,7 @@ def test_every_file_parses_with_the_36_grammar():
         ("'x'.removeprefix('x')\n", "removeprefix"),
         ("def f(x, /): pass\n", "positional-only"),
         ("if (x := 1): pass\n", "assignment expressions"),
+        ("c = {\"a\": 1} | {\"b\": 2}\n", "dict union"),
     ],
 )
 def test_checker_detects_incompatibility(tmp_path, source, message):

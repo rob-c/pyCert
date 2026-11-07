@@ -218,7 +218,11 @@ def cmd_config(args) -> int:
     if args.action == "path":
         from .config import find_config
 
-        print(find_config(args.config))
+        path = find_config(args.config)
+        if args.json:
+            print(json.dumps({"path": str(path)}, indent=2))
+        else:
+            print(path)
         return 0
     if args.action == "set":
         config = load_config(args.config)
@@ -649,7 +653,16 @@ def cmd_wait(args) -> int:
     ctx = _context(args)
     state = ctx.store.get(args.alias)
     if not state.is_pending and state.status != "SIGNED":
-        console.info(f"{state.alias} is {state.status}; nothing to wait for.")
+        if args.json:
+            print(
+                json.dumps(
+                    merge_dicts(state.to_dict(), {"days_remaining": state.days_remaining}),
+                    indent=2,
+                    default=str,
+                )
+            )
+        else:
+            console.info(f"{state.alias} is {state.status}; nothing to wait for.")
         return 0
     from .workflow import wait_for_certificate
 
@@ -928,7 +941,10 @@ def cmd_delete(args) -> int:
         console.info(f"Deleted {directory}; kept {p12}")
     else:
         ctx.store.delete(state)
-        console.info(f"Deleted {directory}")
+        if args.json:
+            print(json.dumps({"alias": state.alias, "deleted": str(directory)}, indent=2))
+        else:
+            console.info(f"Deleted {directory}")
     return 0
 
 

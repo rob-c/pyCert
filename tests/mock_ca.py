@@ -22,11 +22,13 @@ import base64
 import datetime as dt
 import ipaddress
 import ssl
+import struct
 import threading
+import time
 import xml.etree.ElementTree as ET
 
 from pycert import certs
-from pycert.compat import csr_signature_valid, dataclass, not_valid_after, not_valid_before
+from pycert.compat import csr_signature_valid, dataclass, field, not_valid_after, not_valid_before
 
 try:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -88,6 +90,18 @@ class CertRecord:
 
 
 @dataclass
+class Fault:
+    status: int = 500
+    body: bytes = b"<Response><minor><text>injected fault</text></minor></Response>"
+    headers: "dict[str, str]" = field(default_factory=dict)
+    content_type: str = "application/xml"
+    delay: float = 0.0
+    truncate: int = 0
+    reset: bool = False
+    drop: bool = False
+
+
+@dataclass
 class Captured:
     method: str
     path: str
@@ -122,7 +136,16 @@ class MockCA:
         self.next_csr_id = 1000
         self.next_cert_id = 5000
         self.reject_next: "list[tuple[int, bytes]]" = []
+        self.faults: "dict[tuple[str | None, str], list[Fault]]" = {}
         self.delay = 0.0
+        self.pppk_mode = "normal"
+        self.lookup_mode = "normal"
+        self.download_mode = "normal"
+        self.info_mode = "normal"
+        self.require_email_match = True
+        self.reject_duplicate = True
+        self.new_csr_status = "NEW"
+        self.fault_delay = 0.0
         self._build_hierarchy()
         self._build_server_certificate()
 
@@ -155,15 +178,77 @@ class MockCA:
         self.aia_httpd.shutdown()
         self.aia_httpd.server_close()
 
+    def fail_next(
+        self,
+        path: str,
+        *,
+        method: "str | None" = "POST",
+        status: int = 500,
+        body: "bytes | None" = None,
+        headers: "dict | None" = None,
+        delay: float = 0.0,
+        truncate: int = 0,
+        reset: bool = False,
+        drop: bool = False,
+    ) -> Fault:
+        fault = Fault(
+            status=status,
+            body=body
+            if body is not None
+            else b"<Response><minor><text>injected fault</text></minor></Response>",
+            headers=dict(headers or {}),
+            delay=delay,
+            truncate=truncate,
+            reset=reset,
+            drop=drop,
+        )
+        with self.lock:
+            self.faults.setdefault((method, path), []).append(fault)
+        return fault
+
+    def take_fault(self, method: str, path: str) -> "Fault | None":
+        with self.lock:
+            for key in ((method, path), (None, path), (method, path + "*"), (None, path + "*")):
+                queue = self.faults.get(key)
+                if queue:
+                    return queue.pop(0)
+            for key, queue in list(self.faults.items()):
+                if (
+                    queue
+                    and key[1].endswith("*")
+                    and path.startswith(key[1][:-1])
+                    and (key[0] is None or key[0] == method)
+                ):
+                    return queue.pop(0)
+        return None
+
+    def requests_for(self, path: str, method: "str | None" = None):
+        return [
+            item for item in self.captured if item.path == path and (method is None or item.method == method)
+        ]
+
+    def last_request(self, path: str, method: "str | None" = None):
+        items = self.requests_for(path, method)
+        return items[-1] if items else None
+
     def reset(self) -> None:
         with self.lock:
             self.csrs.clear()
             self.certificates.clear()
             self.captured.clear()
             self.reject_next.clear()
+            self.faults.clear()
             self.auto_approve = True
             self.sign_after_polls = 1
             self.delay = 0.0
+            self.pppk_mode = "normal"
+            self.lookup_mode = "normal"
+            self.download_mode = "normal"
+            self.info_mode = "normal"
+            self.require_email_match = True
+            self.reject_duplicate = True
+            self.new_csr_status = "NEW"
+            self.fault_delay = 0.0
 
     # -- hierarchy ---------------------------------------------------------
     def _build_hierarchy(self) -> None:
@@ -452,6 +537,14 @@ class MockCA:
         element = root.find(name)
         return (element.text or "").strip() if element is not None else ""
 
+    @staticmethod
+    def email_in_csr(request, email: str) -> bool:
+        try:
+            san = request.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        except x509.ExtensionNotFound:
+            return False
+        return email in san.get_values_for_type(x509.RFC822Name)
+
     # -- request handling --------------------------------------------------
     def _handler_class(self):
         ca = self
@@ -469,15 +562,53 @@ class MockCA:
                     return b""
                 return self.rfile.read(length) if length else b""
 
-            def _send(self, status: int, body: bytes = b"", content_type: str = "application/xml") -> None:
+            def _send(
+                self,
+                status: int,
+                body: bytes = b"",
+                content_type: str = "application/xml",
+                headers: "dict | None" = None,
+            ) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
+                for key, value in (headers or {}).items():
+                    self.send_header(key, value)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Connection", "close")
                 self.end_headers()
                 if body:
                     self.wfile.write(body)
                 self.close_connection = True
+
+            def _apply_fault(self, fault: Fault) -> None:
+                if fault.delay:
+                    time.sleep(fault.delay)
+                if fault.reset:
+                    try:
+                        self.connection.setsockopt(
+                            __import__("socket").SOL_SOCKET,
+                            __import__("socket").SO_LINGER,
+                            struct.pack("ii", 1, 0),
+                        )
+                    except OSError:
+                        pass
+                    self.close_connection = True
+                    return
+                if fault.drop:
+                    self.close_connection = True
+                    return
+                if fault.truncate:
+                    self.send_response(fault.status)
+                    self.send_header("Content-Type", fault.content_type)
+                    for key, value in fault.headers.items():
+                        self.send_header(key, value)
+                    self.send_header("Content-Length", str(len(fault.body) + fault.truncate))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(fault.body)
+                    self.close_connection = True
+                    return
+                self._send(fault.status, fault.body, fault.content_type, fault.headers)
 
             def _record(self, method: str, path: str, body: bytes) -> None:
                 ca.captured.append(
@@ -487,9 +618,10 @@ class MockCA:
             def do_GET(self):
                 path = urlsplit(self.path).path
                 self._record("GET", path, b"")
+                fault = ca.take_fault("GET", path)
+                if fault is not None:
+                    return self._apply_fault(fault)
                 if ca.delay:
-                    import time
-
                     time.sleep(ca.delay)
                 if path == "/pingservice":
                     return self._send(200, b"pong", "text/plain")
@@ -510,9 +642,10 @@ class MockCA:
                 path = urlsplit(self.path).path
                 body = self._read_body()
                 self._record("POST", path, body)
+                fault = ca.take_fault("POST", path)
+                if fault is not None:
+                    return self._apply_fault(fault)
                 if ca.delay:
-                    import time
-
                     time.sleep(ca.delay)
                 if ca.reject_next:
                     status, payload = ca.reject_next.pop(0)
@@ -551,12 +684,15 @@ class MockCA:
                     return self._send(202, ca._error_xml("CSR signature is invalid"))
                 if "@" not in email:
                     return self._send(202, ca._error_xml("Email is not valid"))
+                if ca.require_email_match and not ca.email_in_csr(request, email):
+                    return self._send(202, ca._error_xml("Email does not match the CSR SAN"))
                 spki = _spki_b64(request.public_key())
                 with ca.lock:
-                    if spki in ca.csrs:
+                    if spki in ca.csrs and ca.reject_duplicate:
                         return self._send(202, ca._error_xml("this public key has already been submitted"))
                     ca.next_csr_id += 1
                     record = CSRRecord(ca.next_csr_id, request, email, pin_hash=pin)
+                    record.status = ca.new_csr_status
                     ca.csrs[spki] = record
                     if ca.auto_approve and ca.sign_after_polls <= 0:
                         ca._sign_csr(record)
@@ -586,6 +722,8 @@ class MockCA:
                     return self._send(202, ca._error_xml("could not parse the CSR"))
                 if not csr_signature_valid(request):
                     return self._send(202, ca._error_xml("CSR signature is invalid"))
+                if kind == "renew" and ca.require_email_match and not ca.email_in_csr(request, email):
+                    return self._send(202, ca._error_xml("Email does not match the CSR SAN"))
 
                 auth_cert = ca._find_auth_cert(
                     self.headers.get("serial"), public_key or None, self.headers.get("id")
@@ -595,32 +733,60 @@ class MockCA:
                 key = auth_cert.public_key()
                 if not isinstance(key, rsa.RSAPublicKey):
                     return self._send(403, ca._error_xml("client certificate must be RSA"))
+
+                mode = ca.pppk_mode
                 realm = "mock-realm"
+                nonce = "Tm9uY2UtMTIzNDU2Nzg5MA=="
+                if mode == "no_challenge":
+                    return self._accept_csr(request, pin, email, kind)
+                if mode == "opaque":
+                    if not self.headers.get("opaque"):
+                        body_out = ca._error_xml("authentication required")
+                        self.send_response(401)
+                        self.send_header("Content-Type", "application/xml")
+                        self.send_header("opaque", "mock-opaque-cookie")
+                        self.send_header("Content-Length", str(len(body_out)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        self.wfile.write(body_out)
+                        self.close_connection = True
+                        return None
+                    return self._accept_csr(request, pin, email, kind)
+                if mode == "bad_keyid":
+                    other = ca.server_key.public_key()
+                    keyid = f"{other.public_numbers().n:x}.{other.public_numbers().e:x}"
+                else:
+                    keyid = f"{key.public_numbers().n:x}.{key.public_numbers().e:x}"
                 if not self.headers.get("response"):
                     body_out = ca._error_xml("authentication required")
                     self.send_response(401)
                     self.send_header("Content-Type", "application/xml")
                     self.send_header("realm", realm)
-                    self.send_header("nonce", "Tm9uY2UtMTIzNDU2Nzg5MA==")
-                    self.send_header("keyid", f"{key.public_numbers().n:x}.{key.public_numbers().e:x}")
+                    self.send_header("nonce", nonce)
+                    self.send_header("keyid", keyid)
                     self.send_header("Content-Length", str(len(body_out)))
                     self.send_header("Connection", "close")
                     self.end_headers()
                     self.wfile.write(body_out)
                     self.close_connection = True
                     return None
+                if mode == "bad_response":
+                    return self._send(403, ca._error_xml("PPPK verification failed: injected"))
                 ok, problem = ca._verify_pppk(
-                    auth_cert, {k.lower(): v for k, v in self.headers.items()}, "Tm9uY2UtMTIzNDU2Nzg5MA=="
+                    auth_cert, {k.lower(): v for k, v in self.headers.items()}, nonce
                 )
                 if not ok:
                     return self._send(403, ca._error_xml(f"PPPK verification failed: {problem}"))
+                return self._accept_csr(request, pin, email, kind)
+
+            def _accept_csr(self, request, pin, email, kind):
                 spki = _spki_b64(request.public_key())
                 with ca.lock:
-                    if spki in ca.csrs:
+                    if spki in ca.csrs and ca.reject_duplicate:
                         return self._send(202, ca._error_xml("this public key has already been submitted"))
                     ca.next_csr_id += 1
                     record = CSRRecord(ca.next_csr_id, request, email, pin_hash=pin, kind=kind)
-                    record.status = "RENEW" if kind == "renew" else "NEW"
+                    record.status = "RENEW" if kind == "renew" else ca.new_csr_status
                     ca.csrs[spki] = record
                     if ca.auto_approve and ca.sign_after_polls <= 0:
                         ca._sign_csr(record)
@@ -631,6 +797,11 @@ class MockCA:
                 if root.tag != "PublicKey":
                     return self._send(400, ca._error_xml("expected PublicKey"))
                 spki = (root.text or "").strip()
+                mode = ca.lookup_mode
+                if mode == "malformed":
+                    return self._send(200, b"<resources><resource><certificates>")
+                if mode == "empty_200":
+                    return self._send(200, b"<resources/>")
                 with ca.lock:
                     record = ca.csrs.get(spki)
                     if record is None:
@@ -641,36 +812,61 @@ class MockCA:
                             record.status = "APPROVED"
                         ca._sign_csr(record)
                     cert_record = ca.certificates.get(record.cert_id) if record.cert_id else None
+                    if mode == "csr_only":
+                        cert_record = None
                     parts = ["<resources><resource>"]
                     parts.append(f"<publickey>{spki}</publickey>")
                     if cert_record is not None:
+                        include_inline = mode not in ("no_inline", "no_id")
+                        include_id = mode != "no_id"
                         certificate_pem = _pem(cert_record.cert)
-                        parts.append("<certificates><certificate>")
-                        parts.append(f"<id>{cert_record.id}</id>")
-                        parts.append(f"<status>{cert_record.status}</status>")
-                        parts.append("<owner>" + certs.name_to_string(cert_record.cert.subject) + "</owner>")
-                        parts.append("<role>RA Operator</role>")
-                        parts.append(f"<useremail>{record.email}</useremail>")
-                        parts.append(
+                        if mode == "wrong_pem":
+                            certificate_pem = _pem(ca.server_cert)
+                        status = "BANANA" if mode == "bad_status" else cert_record.status
+                        block = ["<certificate>"]
+                        if include_id:
+                            block.append(f"<id>{cert_record.id}</id>")
+                        block.append(f"<status>{status}</status>")
+                        block.append("<owner>" + certs.name_to_string(cert_record.cert.subject) + "</owner>")
+                        block.append("<role>RA Operator</role>")
+                        block.append(f"<useremail>{record.email}</useremail>")
+                        block.append(
                             "<startdate>"
                             + not_valid_before(cert_record.cert).strftime("%d/%m/%Y")
                             + "</startdate>"
                         )
-                        parts.append(
+                        block.append(
                             "<enddate>"
                             + not_valid_after(cert_record.cert).strftime("%d/%m/%Y")
                             + "</enddate>"
                         )
-                        parts.append("<lifedays>365</lifedays>")
-                        parts.append(
+                        block.append("<lifedays>365</lifedays>")
+                        block.append(
                             "<renew>" + not_valid_after(cert_record.cert).strftime("%d/%m/%Y") + "</renew>"
                         )
-                        parts.append("<X509Certificate>" + certificate_pem + "</X509Certificate>")
-                        parts.append("</certificate></certificates>")
+                        if include_inline:
+                            block.append("<X509Certificate>" + certificate_pem + "</X509Certificate>")
+                        block.append("</certificate>")
+                        parts.append("<certificates>")
+                        if mode == "multiple":
+                            parts.append(
+                                "<certificate><id>1</id><status>VALID</status><X509Certificate>"
+                                + _pem(ca.root)
+                                + "</X509Certificate></certificate>"
+                            )
+                        parts.append("".join(block))
+                        parts.append("</certificates>")
                     else:
+                        status = record.status
+                        if mode == "csr_approved":
+                            status = "APPROVED"
+                        elif mode == "csr_deleted":
+                            status = "DELETED"
+                        elif mode == "csr_unknown":
+                            status = "SOMETHING_NEW"
                         parts.append("<CSRs><CSR>")
                         parts.append(f"<id>{record.id}</id>")
-                        parts.append(f"<status>{record.status}</status>")
+                        parts.append(f"<status>{status}</status>")
                         parts.append("<owner>" + certs.name_to_string(record.csr.subject) + "</owner>")
                         parts.append("<role>RA Operator</role>")
                         parts.append(f"<useremail>{record.email}</useremail>")
@@ -683,6 +879,22 @@ class MockCA:
                     record = ca.certificates[int(cert_id)]
                 except (ValueError, KeyError):
                     return self._send(404, b"")
+                mode = ca.download_mode
+                if mode == "bare_pem":
+                    return self._send(200, _pem(record.cert).encode(), "application/x-pem-file")
+                if mode == "bare_der":
+                    return self._send(200, _der_cert(record.cert), "application/pkix-cert")
+                if mode == "xml_no_cert":
+                    return self._send(200, b"<certificate><id>%d</id></certificate>" % record.id)
+                if mode == "malformed":
+                    return self._send(200, b"<certificate><X509Certificate>not a cert")
+                if mode == "wrong_cert":
+                    return self._send(
+                        200,
+                        b"<certificate><X509Certificate>"
+                        + _pem(ca.server_cert).encode()
+                        + b"</X509Certificate></certificate>",
+                    )
                 body = (
                     "<certificate><X509Certificate>" + _pem(record.cert) + "</X509Certificate></certificate>"
                 ).encode()
@@ -698,6 +910,28 @@ class MockCA:
                     record = ca.certificates[int(cert_id)]
                 except (ValueError, KeyError):
                     return self._send(404, ca._error_xml("unknown certificate id"))
+                mode = ca.pppk_mode
+                if mode == "no_challenge":
+                    with ca.lock:
+                        record.status = "REVOKED"
+                        record.revoke_reason = reason
+                    return self._send(201, b"")
+                if mode == "opaque":
+                    if not self.headers.get("opaque"):
+                        out = ca._error_xml("authentication required")
+                        self.send_response(401)
+                        self.send_header("Content-Type", "application/xml")
+                        self.send_header("opaque", "mock-opaque-cookie")
+                        self.send_header("Content-Length", str(len(out)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        self.wfile.write(out)
+                        self.close_connection = True
+                        return None
+                    with ca.lock:
+                        record.status = "REVOKED"
+                        record.revoke_reason = reason
+                    return self._send(201, b"")
                 if not self.headers.get("response"):
                     key = record.cert.public_key()
                     if not isinstance(key, rsa.RSAPublicKey):
@@ -714,6 +948,8 @@ class MockCA:
                     self.wfile.write(out)
                     self.close_connection = True
                     return None
+                if mode == "bad_response":
+                    return self._send(403, ca._error_xml("PPPK verification failed: injected"))
                 ok, problem = ca._verify_pppk(
                     record.cert, {k.lower(): v for k, v in self.headers.items()}, "UmV2b2tlLU5vbmNl"
                 )
@@ -727,15 +963,32 @@ class MockCA:
         return Handler
 
     def _ca_xml(self) -> bytes:
-        parts = [
-            "<CA><certificates>",
-            "<certificate>" + _pem(self.root) + "</certificate>",
-            "<certificate>" + _pem(self.intermediate) + "</certificate>",
-            "</certificates><RAlist>",
-            "<ra><ou>CLRC</ou><l>DL</l><operator><id>1</id></operator></ra>",
-            "<ra><ou>CLRC</ou><l>RAL</l><operator><id>2</id></operator></ra>",
-            "</RAlist><PreferredRA><ra><ou>CLRC</ou><l>DL</l></ra></PreferredRA>",
-            "<Policy><MaxExpiredRekey>30</MaxExpiredRekey><MaxPrivateKeyLifeTime>365</MaxPrivateKeyLifeTime></Policy>",
-            "</CA>",
-        ]
+        mode = self.info_mode
+        if mode == "bad_xml":
+            return b"<CA><RAlist>"
+        if mode == "empty":
+            return b"<CA><certificates></certificates><RAlist></RAlist></CA>"
+        cert_text = _pem(self.root)
+        if mode == "malformed_cert":
+            cert_text = "not a certificate"
+        parts = ["<CA><certificates>", "<certificate>" + cert_text + "</certificate>"]
+        if mode != "one_cert":
+            parts.append("<certificate>" + _pem(self.intermediate) + "</certificate>")
+        parts.append("</certificates><RAlist>")
+        if mode == "huge_ra":
+            for index in range(500):
+                parts.append("<ra><ou>CLRC</ou><l>RA%d</l><operator><id>1</id></operator></ra>" % index)
+            preferred = "RA0"
+        else:
+            parts.append("<ra><ou>CLRC</ou><l>DL</l><operator><id>1</id></operator></ra>")
+            parts.append("<ra><ou>CLRC</ou><l>RAL</l><operator><id>2</id></operator></ra>")
+            preferred = "DL"
+        parts.append("</RAlist>")
+        if mode != "no_preferred":
+            parts.append("<PreferredRA><ra><ou>CLRC</ou><l>%s</l></ra></PreferredRA>" % preferred)
+        if mode != "no_policy":
+            parts.append(
+                "<Policy><MaxExpiredRekey>30</MaxExpiredRekey><MaxPrivateKeyLifeTime>365</MaxPrivateKeyLifeTime></Policy>"
+            )
+        parts.append("</CA>")
         return "".join(parts).encode()

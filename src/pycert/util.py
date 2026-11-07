@@ -102,7 +102,10 @@ def atomic_write(path: Path, data: "bytes | str", mode: int = SECRET_FILE_MODE) 
                 os.chmod(tmp, mode)
             handle.write(data)
             handle.flush()
-            os.fsync(handle.fileno())
+            try:
+                os.fsync(handle.fileno())
+            except OSError:  # pragma: no cover - filesystems without fsync
+                pass
         os.replace(tmp, path)
         _fsync_directory(path.parent)
     except BaseException:

@@ -81,3 +81,10 @@ def issued(ctx, config, ca):
         )
 
     return _make
+
+
+@pytest.fixture
+def e2e(config, ctx, ca, capsys):
+    from e2e import E2E
+
+    return E2E(config, ctx, ca, capsys)

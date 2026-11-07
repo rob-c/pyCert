@@ -171,6 +171,16 @@ def check_source(path, source):
             add(node, "assignment expression (walrus) is 3.8+")
         elif isinstance(node, ast.Match) if hasattr(ast, "Match") else False:
             add(node, "match statement is 3.10+")
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            left, right = node.left, node.right
+            dict_like = (
+                isinstance(left, ast.Dict)
+                or isinstance(right, ast.Dict)
+                or (isinstance(left, ast.Call) and isinstance(left.func, ast.Attribute) and left.func.attr in ("to_dict", "as_dict"))
+                or (isinstance(right, ast.Call) and isinstance(right.func, ast.Attribute) and right.func.attr in ("to_dict", "as_dict"))
+            )
+            if dict_like:
+                add(node, "runtime dict union '|' requires Python 3.9; use merge_dicts")
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if getattr(node.args, "posonlyargs", []):
                 add(node, "positional-only parameters are 3.8+")

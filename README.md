@@ -55,7 +55,7 @@ workflow) are about 4,000 lines and can be reviewed end to end in an afternoon.
 | Waiting for signing | user clicks refresh repeatedly | `--wait` / `pycert wait`, exponential jitter, cancellable, exit code 3 on timeout |
 | PIN | SHA-1 hash, entered in a Swing dialog | SHA-1 hash (server requirement), generated once and shown in a modal/GUI |
 | Automation | GUI only | CLI + `--json` + exit codes + cron/launchd examples |
-| Tests | a couple of XML parser tests | 2,150+ tests, including a mock CA over TLS, network fault injection, fuzzing and concurrency suites |
+| Tests | a couple of XML parser tests | 3,150+ tests, including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
 | Documentation | `readme.txt` | README, configuration reference, protocol notes, security model, migration guide |
 
 Everything above is verifiable from the sources: the Java template default is in
@@ -96,7 +96,7 @@ picks cryptography 3.3.x automatically.
 The package is validated on Python 3.6.15 with cryptography 3.3.2 in a
 container: install, `pycert selftest`, `init`, `config check`, live `ping`/`ras`
 and `doctor`, plus a full mock-CA request → download → PKCS#12 → renew → revoke
-flow.  The 2,150+ test suite itself runs on a modern Python.
+flow.  The 3,150+ test suite itself runs on a modern Python.
 
 ---
 
@@ -379,7 +379,7 @@ The CA protocol is undocumented; pyCert implements what CertWizard does (see
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # 2,150+ tests
+$ make test           # 3,150+ tests
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6
 $ make build          # wheel + sdist

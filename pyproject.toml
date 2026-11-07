@@ -12,7 +12,10 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-filterwarnings = ["error::DeprecationWarning:pycert.*"]
+filterwarnings = [
+  "error::DeprecationWarning:pycert.*",
+  "ignore:the Tcl interpreter is leaked.*:RuntimeWarning",
+]
 
 [tool.ruff]
 line-length = 110
