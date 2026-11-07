@@ -14,18 +14,15 @@ material.  The PIN is used once to compute the hash the RA compares against, and
 is then dropped.
 """
 
-from __future__ import annotations
-
 import hashlib
 import random
 import re
 import secrets as secrets_module
 import time
 import unicodedata
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -35,6 +32,7 @@ from . import certs, chain
 from . import csr as csr_module
 from . import p12 as p12_module
 from .ca import RA, CAClient, Lookup
+from .compat import dataclass, field, merge_dicts, not_valid_after, not_valid_before
 from .config import Config
 from .errors import (
     CAError,
@@ -95,7 +93,7 @@ class AppContext:
     secrets: SecretStore
 
     @classmethod
-    def from_config(cls, config: Config) -> AppContext:
+    def from_config(cls, config: Config) -> "AppContext":  # noqa: F821
         store = Store(config.data_dir)
         ensure_dir(config.data_dir)
         ensure_dir(config.data_dir / "requests")
@@ -115,7 +113,7 @@ class AppContext:
         return CAClient(self.config)
 
     # -- trust -------------------------------------------------------------
-    def anchors(self) -> list[x509.Certificate]:
+    def anchors(self) -> "list[x509.Certificate]":
         anchors = list(self.config.bundle.anchors)
         if self.config.use_system_trust():
             anchors.extend(chain.system_anchors())
@@ -140,7 +138,9 @@ def normalize_common_name(value: str, cert_type: str) -> str:
     name = unicodedata.normalize("NFC", " ".join(value.split()))
     if not name:
         raise PyCertError("the common name is empty")
-    if not name.isascii():
+    try:
+        name.encode("ascii")
+    except UnicodeEncodeError:
         raise PyCertError("the common name contains non-ASCII characters; the RA only accepts ASCII names")
     if cert_type == "host":
         candidate = name.lower().rstrip(".")
@@ -172,7 +172,7 @@ def validate_email(value: str) -> str:
     return email
 
 
-def parse_ra(text: str) -> tuple[str, str]:
+def parse_ra(text: str) -> "tuple[str, str]":
     """Split an RA string ('CLRC DL' or 'CLRC,DL') into (OU, L)."""
     parts = [p for p in re.split(r"[,\s]+", text.strip()) if p]
     if len(parts) != 2:
@@ -225,7 +225,7 @@ def modulus_exponent(certificate: x509.Certificate) -> str:
     return f"{numbers.n:x}.{numbers.e:x}"
 
 
-def _report_pin(pin: str, on_pin: Callable[[str], None] | None, progress: Progress) -> None:
+def _report_pin(pin: str, on_pin: "Callable[[str], None] | None", progress: Progress) -> None:
     """Surface a generated PIN once: through the caller (GUI dialog) or progress."""
     if on_pin is not None:
         on_pin(pin)
@@ -261,15 +261,15 @@ class RequestSpec:
     rsa_bits: int = 0
     ec_curve: str = ""
     pin: str = ""
-    san_dns: list[str] = field(default_factory=list)
-    san_email: list[str] = field(default_factory=list)
-    san_ip: list[str] = field(default_factory=list)
-    csr_extensions: list[str] | None = None
+    san_dns: "list[str]" = field(default_factory=list)
+    san_email: "list[str]" = field(default_factory=list)
+    san_ip: "list[str]" = field(default_factory=list)
+    csr_extensions: "list[str] | None" = None
     csr_hash: str = ""
     auth_alias: str = ""
 
     @classmethod
-    def build(cls, config: Config, cn: str, **overrides) -> RequestSpec:
+    def build(cls, config: Config, cn: str, **overrides) -> "RequestSpec":  # noqa: F821
         spec = cls(
             cn=cn,
             type=overrides.pop("type", "user"),
@@ -355,7 +355,7 @@ def create_request(
     spec: RequestSpec,
     *,
     progress: Progress = noop,
-    on_pin: Callable[[str], None] | None = None,
+    on_pin: "Callable[[str], None] | None" = None,
     wait: bool = False,
     timeout: float = DEFAULT_WAIT_TIMEOUT,
     interval: float = DEFAULT_WAIT_INTERVAL,
@@ -488,7 +488,7 @@ class PollOutcome:
     server_status: str
     pending: bool
     message: str
-    certificate: x509.Certificate | None = None
+    certificate: "x509.Certificate | None" = None
     cert_id: str = ""
     terminal: bool = False
 
@@ -510,13 +510,15 @@ _CSR_DESCRIPTIONS = {
 _CERT_TERMINAL = {"REVOKED", "EXPIRED", "SUSPENDED", "DELETED"}
 
 
-def poll_once(ctx: AppContext, state: RequestState, *, progress: Progress = noop) -> PollOutcome:
+def poll_once(
+    ctx: AppContext, state: RequestState, *, progress: Progress = noop, stop_event=None
+) -> PollOutcome:
     """Ask the CA for the status of the key used by this request."""
     spki = state.active_spki_b64
     if not spki:
         raise PyCertError(f"'{state.alias}' has no public key recorded; cannot query the CA")
     client = ctx.client()
-    lookup: Lookup = client.lookup_public_key(spki)
+    lookup: Lookup = client.lookup_public_key(spki, stop_event=stop_event)
     state.server.last_checked = iso()
 
     certificate_entry = lookup.latest_certificate
@@ -543,7 +545,7 @@ def poll_once(ctx: AppContext, state: RequestState, *, progress: Progress = noop
         certificate = certificate_entry.certificate()
         if certificate is None and certificate_entry.id:
             progress(f"Downloading certificate {certificate_entry.id}...")
-            certificate = client.download_certificate(certificate_entry.id)
+            certificate = client.download_certificate(certificate_entry.id, stop_event=stop_event)
         if certificate is not None:
             if not _public_key_matches(certificate, state, ctx):
                 raise ProtocolError(
@@ -623,13 +625,14 @@ def wait_for_certificate(
         if stop_event is not None and stop_event.is_set():
             raise PyCertError("cancelled")
         attempt += 1
-        outcome = poll_once(ctx, state, progress=progress)
+        outcome = poll_once(ctx, state, progress=progress, stop_event=stop_event)
         state = outcome.state
         if outcome.certificate is not None:
             progress(f"Certificate issued (server status {outcome.server_status})")
             return download_and_export(
                 ctx,
                 state,
+                stop_event=stop_event,
                 certificate=outcome.certificate,
                 cert_id=outcome.cert_id,
                 progress=progress,
@@ -669,17 +672,18 @@ def download_and_export(
     ctx: AppContext,
     state: RequestState,
     *,
-    certificate: x509.Certificate | None = None,
+    stop_event=None,
+    certificate: "x509.Certificate | None" = None,
     cert_id: str = "",
     progress: Progress = noop,
     export: bool = True,
     require_verified_chain: bool = True,
-    password: str | None = None,
-    out: Path | None = None,
+    password: "str | None" = None,
+    out: "Path | None" = None,
 ) -> RequestState:
     """Verify an issued certificate, store it with its chain, and export a .p12."""
     if certificate is None:
-        outcome = poll_once(ctx, state, progress=progress)
+        outcome = poll_once(ctx, state, progress=progress, stop_event=stop_event)
         if outcome.certificate is None:
             raise CAError(
                 f"no certificate is available yet for '{state.alias}' "
@@ -702,8 +706,8 @@ def download_and_export(
     if not certs.certificate_valid_at(certificate):
         raise CryptoError(
             "the issued certificate is not valid at the current time "
-            f"({certificate.not_valid_before_utc.isoformat()} .. "
-            f"{certificate.not_valid_after_utc.isoformat()})"
+            f"({not_valid_before(certificate).isoformat()} .. "
+            f"{not_valid_after(certificate).isoformat()})"
         )
 
     issued_cn = certs.name_attribute(certificate.subject, NameOID.COMMON_NAME) or ""
@@ -733,8 +737,8 @@ def download_and_export(
         subject=description.subject,
         issuer=description.issuer,
         serial=description.serial,
-        not_before=description.not_before.astimezone(UTC).isoformat(),
-        not_after=description.not_after.astimezone(UTC).isoformat(),
+        not_before=description.not_before.astimezone(timezone.utc).isoformat(),
+        not_after=description.not_after.astimezone(timezone.utc).isoformat(),
         sha256=description.fingerprint_sha256.replace(":", "").lower(),
         key=description.key,
         sans=description.subject_alt_names,
@@ -743,14 +747,12 @@ def download_and_export(
     )
     state.server.cert_id = cert_id or state.server.cert_id
     state.server.status = "VALID" if result.trusted else (state.server.status or "")
-    state.server.start_date = certificate.not_valid_before_utc.strftime("%d/%m/%Y")
-    state.server.end_date = certificate.not_valid_after_utc.strftime("%d/%m/%Y")
-    state.server.life_days = str((certificate.not_valid_after_utc - certificate.not_valid_before_utc).days)
+    state.server.start_date = not_valid_before(certificate).strftime("%d/%m/%Y")
+    state.server.end_date = not_valid_after(certificate).strftime("%d/%m/%Y")
+    state.server.life_days = str((not_valid_after(certificate) - not_valid_before(certificate)).days)
     state.server.renew = (
-        certificate.not_valid_after_utc
-        - timedelta(
-            days=max(30, (certificate.not_valid_after_utc - certificate.not_valid_before_utc).days // 5)
-        )
+        not_valid_after(certificate)
+        - timedelta(days=max(30, (not_valid_after(certificate) - not_valid_before(certificate)).days // 5))
     ).strftime("%d/%m/%Y")
     if not result.trusted:
         state.notes.extend(f"chain: {p}" for p in result.problems)
@@ -759,7 +761,7 @@ def download_and_export(
     ctx.store.save(state)
     progress(
         f"Certificate stored: {ctx.store.cert_path(state)} "
-        f"(valid until {certificate.not_valid_after_utc.date()})"
+        f"(valid until {not_valid_after(certificate).date()})"
     )
 
     if not result.trusted and require_verified_chain:
@@ -782,8 +784,8 @@ def export_p12(
     ctx: AppContext,
     state: RequestState,
     *,
-    password: str | None = None,
-    out: Path | None = None,
+    password: "str | None" = None,
+    out: "Path | None" = None,
     progress: Progress = noop,
 ) -> Path:
     """Write (or re-write) the PKCS#12 bundle for a stored certificate."""
@@ -800,6 +802,12 @@ def export_p12(
         filename = _format(ctx.config.p12.filename_template, state)
         if not filename.lower().endswith(".p12"):
             filename += ".p12"
+        # A filename template must not escape the request/export directory.
+        if filename != Path(filename).name or filename in (".", ".."):
+            raise ConfigError(
+                "p12.filename_template produced a path with directory components (%r); "
+                "use p12.export_dir to choose a directory" % filename
+            )
         if ctx.config.p12.export_dir:
             directory = ensure_dir(ctx.config.resolve(ctx.config.p12.export_dir))
         else:
@@ -834,7 +842,7 @@ def renew(
     alias: str,
     *,
     progress: Progress = noop,
-    on_pin: Callable[[str], None] | None = None,
+    on_pin: "Callable[[str], None] | None" = None,
     wait: bool = False,
     timeout: float = DEFAULT_WAIT_TIMEOUT,
     interval: float = DEFAULT_WAIT_INTERVAL,
@@ -844,9 +852,9 @@ def renew(
     rsa_bits: int = 0,
     ec_curve: str = "",
     email: str = "",
-    san_dns: list[str] | None = None,
-    san_email: list[str] | None = None,
-    san_ip: list[str] | None = None,
+    san_dns: "list[str] | None" = None,
+    san_email: "list[str] | None" = None,
+    san_ip: "list[str] | None" = None,
     pin: str = "",
     stop_event=None,
 ) -> RequestState:
@@ -969,7 +977,7 @@ def _san_values(certificate: x509.Certificate, kind) -> list:
 
 
 def revoke(
-    ctx: AppContext, alias: str, reason: str = "unspecified", *, progress: Progress = noop
+    ctx: AppContext, alias: str, reason: str = "unspecified", *, progress: Progress = noop, stop_event=None
 ) -> RequestState:
     state = ctx.store.get(alias)
     if state.status == STATUS_REVOKED:
@@ -981,7 +989,7 @@ def revoke(
         )
     if not state.server.cert_id:
         progress("Looking up the certificate id...")
-        outcome = poll_once(ctx, state, progress=progress)
+        outcome = poll_once(ctx, state, progress=progress, stop_event=stop_event)
         state = outcome.state
         if not state.server.cert_id:
             raise CAError(f"the CA did not report a certificate id for '{state.alias}'")
@@ -1044,16 +1052,16 @@ def import_p12(
         subject=description.subject,
         issuer=description.issuer,
         serial=description.serial,
-        not_before=description.not_before.astimezone(UTC).isoformat(),
-        not_after=description.not_after.astimezone(UTC).isoformat(),
+        not_before=description.not_before.astimezone(timezone.utc).isoformat(),
+        not_after=description.not_after.astimezone(timezone.utc).isoformat(),
         sha256=description.fingerprint_sha256.replace(":", "").lower(),
         key=description.key,
         sans=description.subject_alt_names,
         chain_sha256=[certs.fingerprint(c) for c in result.chain],
         verified=result.trusted,
     )
-    state.server.start_date = bundle.cert.not_valid_before_utc.strftime("%d/%m/%Y")
-    state.server.end_date = bundle.cert.not_valid_after_utc.strftime("%d/%m/%Y")
+    state.server.start_date = not_valid_before(bundle.cert).strftime("%d/%m/%Y")
+    state.server.end_date = not_valid_after(bundle.cert).strftime("%d/%m/%Y")
     ctx.store.save_certificate(state, bundle.cert, result.issuers)
     state.set_status(STATUS_IMPORTED, f"imported from {path}")
     if not result.trusted:
@@ -1072,9 +1080,9 @@ def import_p12(
 class VerifyReport:
     alias: str
     ok: bool
-    checks: list[tuple[str, bool, str]] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    chain: chain.ChainResult | None = None
+    checks: "list[tuple[str, bool, str]]" = field(default_factory=list)
+    warnings: "list[str]" = field(default_factory=list)
+    chain: "chain.ChainResult | None" = None
 
     def add(self, name: str, passed: bool, detail: str = "") -> None:
         self.checks.append((name, passed, detail))
@@ -1095,7 +1103,7 @@ class VerifyReport:
 
 
 def verify(
-    ctx: AppContext, alias: str, *, check_p12: bool = True, now: datetime | None = None
+    ctx: AppContext, alias: str, *, check_p12: bool = True, now: "datetime | None" = None
 ) -> VerifyReport:
     report = VerifyReport(alias=alias, ok=True)
     state = ctx.store.get(alias)
@@ -1117,14 +1125,14 @@ def verify(
             certs.certificate_matches_key(certificate, key),
             "SubjectPublicKeyInfo comparison",
         )
-    now = now or datetime.now(UTC)
+    now = now or datetime.now(timezone.utc)
     valid = certs.certificate_valid_at(certificate, now)
     report.add(
         "certificate valid now",
         valid,
-        f"{certificate.not_valid_before_utc.date()} .. {certificate.not_valid_after_utc.date()}",
+        f"{not_valid_before(certificate).date()} .. {not_valid_after(certificate).date()}",
     )
-    days = (certificate.not_valid_after_utc - now).days
+    days = (not_valid_after(certificate) - now).days
     if days <= 30:
         report.warn(f"the certificate expires in {days} days; plan a renewal")
     result = ctx.build_chain(certificate)
@@ -1170,7 +1178,7 @@ def install_pem(
     encrypt_key: bool = False,
     include_chain: bool = False,
     progress: Progress = noop,
-) -> dict[str, Path]:
+) -> "dict[str, Path]":
     state = ctx.store.get(alias)
     certificate = ctx.store.load_certificate(state)
     key = ctx.store.load_key(state, ctx.key_passphrase())
@@ -1197,9 +1205,9 @@ def install_pem(
 # ---------------------------------------------------------------------------
 
 
-def refresh_all(ctx: AppContext, *, progress: Progress = noop) -> list[tuple[RequestState, str]]:
+def refresh_all(ctx: AppContext, *, progress: Progress = noop) -> "list[tuple[RequestState, str]]":
     """Poll every pending request once (no downloads)."""
-    results: list[tuple[RequestState, str]] = []
+    results: "list[tuple[RequestState, str]]" = []
     for state in ctx.store.pending():
         try:
             outcome = poll_once(ctx, state, progress=noop)
@@ -1211,11 +1219,11 @@ def refresh_all(ctx: AppContext, *, progress: Progress = noop) -> list[tuple[Req
     return results
 
 
-def list_ras(ctx: AppContext) -> list[RA]:
+def list_ras(ctx: AppContext) -> "list[RA]":
     return ctx.client().info().ras
 
 
-def expiry_warning(state: RequestState, days: int = 30) -> str | None:
+def expiry_warning(state: RequestState, days: int = 30) -> "str | None":
     remaining = state.days_remaining
     if remaining is None:
         return None
@@ -1227,4 +1235,4 @@ def expiry_warning(state: RequestState, days: int = 30) -> str | None:
 
 
 def describe_state(state: RequestState) -> dict:
-    return state.to_dict() | {"days_remaining": state.days_remaining}
+    return merge_dicts(state.to_dict(), {"days_remaining": state.days_remaining})

@@ -34,17 +34,17 @@ adds a certificate list, expiry warnings, chain inspection and one-click verific
 
 The Java client works, but it is hard to audit, hard to automate, and carries a
 lot of legacy: a bundled JRE, Restlet, BouncyCastle, Log4j and a trust store
-whose password is the literal string `passwd`. pyCert is about 8,300 lines of
-Python - including a 2,000-line Tkinter GUI - plus 2,800 lines of tests, and
-depends only on [`cryptography`](https://cryptography.io/). The library that
-talks to the CA is under 3,500 lines and can be reviewed end to end in an
-afternoon.
+whose password is the literal string `passwd`. pyCert is about 10,700 lines of
+Python - including a 2,000-line Tkinter GUI - plus 7,800 lines of tests, and
+depends only on [`cryptography`](https://cryptography.io/). The modules that
+talk to the CA (transport, client, chain, certificates, CSR, PKCS#12 and
+workflow) are about 4,000 lines and can be reviewed end to end in an afternoon.
 
 ### At a glance
 
 | | CertWizard (Java) | pyCert |
 |---|---|---|
-| Runtime | JDK 11+, bundled JRE in installers | Python 3.11+ (stdlib + `cryptography`) |
+| Runtime | JDK 11+, bundled JRE in installers | Python 3.6+ (stdlib + `cryptography`) |
 | Startup | JVM + Swing + Restlet initialisation | ~90 ms CLI, ~440 ms to a painted GUI window (measured) |
 | Build | Maven, NetBeans for the GUI forms | `pip install .` |
 | TLS trust | JKS trust store, password `passwd` in the config | PEM chain in the config, pinned by SHA-256; optional leaf pin |
@@ -55,7 +55,7 @@ afternoon.
 | Waiting for signing | user clicks refresh repeatedly | `--wait` / `pycert wait`, exponential jitter, cancellable, exit code 3 on timeout |
 | PIN | SHA-1 hash, entered in a Swing dialog | SHA-1 hash (server requirement), generated once and shown in a modal/GUI |
 | Automation | GUI only | CLI + `--json` + exit codes + cron/launchd examples |
-| Tests | a couple of XML parser tests | 170+ tests, including a mock CA over TLS and a full request → sign → export flow |
+| Tests | a couple of XML parser tests | 1,120+ tests, including a mock CA over TLS, network fault injection and a full request → sign → export flow |
 | Documentation | `readme.txt` | README, configuration reference, protocol notes, security model, migration guide |
 
 Everything above is verifiable from the sources: the Java template default is in
@@ -75,11 +75,28 @@ $ .venv/bin/pip install -e .
 $ .venv/bin/pycert --version
 ```
 
-The only mandatory dependency is `cryptography` (OpenSSL-backed). The GUI uses
+The only mandatory dependency is `cryptography` (OpenSSL-backed; `>=3.0`, with
+the newest compatible release selected for your Python). The GUI uses
 `tkinter` from the standard library; on macOS with Homebrew Python install it
 with `brew install python-tk@3.15` (or the matching version).
 
-Python 3.11 or newer is required (for `tomllib`).
+### Supported Python versions
+
+pyCert runs on **Python 3.6 and newer**.  The package deliberately avoids
+`dataclasses`, `tomllib`, `datetime.fromisoformat` and other 3.7+ APIs; the
+compatibility layer (`pycert/compat.py`, `pycert/toml.py`,
+`pycert/_dataclasses.py`) has its own tests and every package file is checked
+against the 3.6 grammar by `tools/check_py36.py`.
+
+Python 3.6 is end-of-life, and the newest `cryptography` that supports it is
+3.3.x.  pyCert works there — including the old-cryptography API fallbacks — but
+for new deployments use Python 3.9 or newer.  On 3.6 the dependency resolver
+picks cryptography 3.3.x automatically.
+
+The package is validated on Python 3.6.15 with cryptography 3.3.2 in a
+container: install, `pycert selftest`, `init`, `config check`, live `ping`/`ras`
+and `doctor`, plus a full mock-CA request → download → PKCS#12 → renew → revoke
+flow.  The 1,120+ test suite itself runs on a modern Python.
 
 ---
 
@@ -219,6 +236,8 @@ Global options: `--config PATH`, `--json`, `-q/--quiet`, `-v`, `--debug`.
 | `pycert install ALIAS [--dir ~/.globus]` | write `usercert.pem` / `userkey.pem` |
 | `pycert delete ALIAS` | delete the local files for a request |
 | `pycert secret set\|get\|rm\|list\|test` | manage the saved passphrase |
+| `pycert doctor [--offline]` | diagnose configuration, chain, permissions, secrets, DNS, TLS and clock skew |
+| `pycert selftest` | offline self-checks of TOML, key generation, CSR, PKCS#12 and the bundled chain |
 | `pycert gui` | start the graphical interface |
 
 `request`, `renew` and `wait` accept `--wait`, `--timeout` (default 24h),
@@ -230,6 +249,35 @@ visible in the process list and prints a warning.
 
 Passphrase options for `import`/`export`/`download`: `--password-file`,
 `--password-stdin`, or the saved secret (the default).
+
+### Network behaviour
+
+The CA client is built on a hardened transport (`pycert/transport.py`) rather
+than raw `urllib` calls:
+
+* **deadlines**: every request has a total deadline (`ca.deadline`) in addition
+  to socket timeouts; headers and body are read in bounded chunks so a trickling
+  server cannot pin a thread;
+* **DNS**: resolution has its own timeout (`ca.dns_timeout`), a small positive
+  cache, and returns a clear `dns` error instead of hanging;
+* **framing**: short `Content-Length`, malformed chunks, bad status lines,
+  oversized headers/bodies and compressed responses are hard errors, never
+  silently truncated data;
+* **retries**: only idempotent requests (GET/HEAD and the status lookup) are
+  retried, with exponential backoff and full jitter; `408`, `425`, `429`, `500`,
+  `502`, `503`, `504` are retryable and `Retry-After` is honoured (capped);
+  submissions and revocations are **never** retried;
+* **redirects**: at most `ca.max_redirects` same-host redirects, never for POST,
+  never to plaintext or another host;
+* **cancellation**: a stop event is honoured before connecting and between body
+  chunks, so the GUI's Cancel and Ctrl-C are responsive;
+* **clock skew**: the server's `Date` header is used to correct the timestamp in
+  the PPPK challenge, so a slightly wrong local clock does not break renewals.
+
+Tune these with `ca.connect_timeout`, `ca.deadline`, `ca.dns_timeout`,
+`ca.retries`, `ca.max_redirects`, `ca.max_body_bytes`, `ca.max_header_bytes`,
+`ca.backoff_base` and `ca.backoff_cap` — see
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ### Exit codes
 
@@ -328,18 +376,22 @@ The CA protocol is undocumented; pyCert implements what CertWizard does (see
 ## Development
 
 ```console
-$ make dev            # virtualenv with pytest and ruff
-$ make test           # 170+ tests
-$ make lint
+$ make dev            # virtualenv with pytest, ruff and vermin
+$ make test           # 1,120+ tests
+$ make lint           # ruff
+$ make check-py36     # grammar + runtime feature checks for Python 3.6
 $ make build          # wheel + sdist
 ```
 
 The test suite includes a **mock CA** (`tests/mock_ca.py`) that speaks the same
-XML protocol over real TLS, with an RSA root signing an ECDSA intermediate. It
-exercises submission, PPPK challenges, polling, certificate download, chain
-building (including AIA fetching over HTTP), renewal, revocation and PKCS#12
-export. Generated `.p12` files and certificates are cross-checked with the
-`openssl` command line where available.
+XML protocol over real TLS, with an RSA root signing an ECDSA intermediate, and a
+raw fault-injection server (`tests/raw_server.py`) that can send malformed
+status lines, truncated bodies, slow bytes, resets, redirects and oversized
+responses. Tests cover submission, PPPK challenges, polling, certificate
+download, chain building (including AIA fetching over HTTP), renewal, revocation,
+PKCS#12 export, the Python 3.6 fallbacks and a differential TOML parser check
+against `tomllib`. Generated `.p12` files and certificates are cross-checked with
+the `openssl` command line where available.
 
 ```
 src/pycert/
@@ -349,9 +401,15 @@ src/pycert/
 ├── certs.py           certificate/key helpers, descriptions, names
 ├── csr.py             PKCS#10 construction
 ├── p12.py             PKCS#12 read/write
+├── pkcs12_writer.py   modern PKCS#12 container (PBES2/AES-256, HMAC-SHA256)
+├── asn1.py            minimal DER encoder for the PKCS#12 container
 ├── store.py           on-disk state, permissions, locking
 ├── secrets_store.py   keychain/secret-service/file/command backends
 ├── workflow.py        request → wait → download → export → renew → revoke
+├── transport.py       hardened HTTP(S): deadlines, retries, limits, DNS, TLS
+├── toml.py            TOML parser for Python 3.6
+├── compat.py          version/API compatibility helpers
+├── diagnostics.py     doctor / selftest
 ├── cli.py             argparse front-end
 └── gui.py             Tkinter front-end
 ```
@@ -362,10 +420,13 @@ src/pycert/
   `openssl verify -crl_check` with the CRL if you need revocation checking).
 - One CA profile per configuration file (use `--config` for several).
 - No bulk host certificate requests (`/CSRs` with multiple `<CSR>` elements).
-- No Windows installer; the CLI and GUI run wherever Python 3.11+ and Tk are
+- No Windows installer; the CLI and GUI run wherever Python 3.6+ and Tk are
   available.
 - The protocol implementation follows observed CertWizard behaviour, not a
   published specification; see docs/PROTOCOL.md for the exact wire format.
+- On Python 3.6, `cryptography` cannot be newer than 3.3.x (upstream EOL), so
+  security fixes may require a newer Python; pyCert warns about this in
+  `pycert doctor`.
 
 ## Licence
 

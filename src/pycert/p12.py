@@ -1,11 +1,15 @@
 """PKCS#12 (.p12) writing and reading.
 
-Writing is delegated to ``cryptography``'s ``serialize_key_and_certificates``,
-which produces a standard PKCS#12 v3 file:
+Writing uses pyCert's own PKCS#12 container encoder
+(:mod:`pycert.pkcs12_writer`) with primitives from ``cryptography``.  This keeps
+the output identical on every supported Python instead of depending on the
+OpenSSL version linked into ``cryptography`` (older releases fall back to
+PBES2-SHA1-3DES):
 
-* PBES2 with PBKDF2-HMAC-SHA256 and AES-256-CBC for both the certificate bag
-  and the shrouded private key (20 000 iterations, as implemented by OpenSSL);
-* an HMAC-SHA-256 integrity MAC;
+* PBES2 with PBKDF2-HMAC-SHA256 (100,000 iterations) and AES-256-CBC for the
+  key bag and the encrypted SafeContents;
+* an HMAC-SHA-256 integrity MAC (20,000 KDF iterations), with a SHA-1 MAC
+  fallback only for readers that cannot verify HMAC-SHA-256;
 * a friendly name and a localKeyID linking key and certificate.
 
 That is readable by OpenSSL 3, Java 11+, macOS Keychain, Firefox and Windows,
@@ -17,17 +21,16 @@ legacy PBE-SHA1-3DES and RC2 files that CertWizard produced, so existing
 keystores can be imported for renewal.
 """
 
-from __future__ import annotations
-
 import hashlib
-from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography import x509
-from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, pkcs12
+from cryptography.hazmat.primitives.serialization import pkcs12
 
 from . import certs
+from .compat import dataclass
 from .errors import CryptoError, PyCertError
+from .pkcs12_writer import DEFAULT_ITERATIONS, DEFAULT_MAC_ITERATIONS, encode_pkcs12
 from .util import SECRET_FILE_MODE, atomic_write, ensure_dir
 
 
@@ -35,7 +38,7 @@ from .util import SECRET_FILE_MODE, atomic_write, ensure_dir
 class P12Bundle:
     key: object
     cert: x509.Certificate
-    chain: list[x509.Certificate]
+    chain: "list[x509.Certificate]"
 
     def as_dict(self) -> dict:
         return {
@@ -50,10 +53,12 @@ def write_pkcs12(
     *,
     key,
     certificate: x509.Certificate,
-    chain: list[x509.Certificate] | None = None,
+    chain: "list[x509.Certificate] | None" = None,
     password: str,
     friendly_name: str = "",
     verify: bool = True,
+    iterations: int = DEFAULT_ITERATIONS,
+    mac_iterations: int = DEFAULT_MAC_ITERATIONS,
 ) -> Path:
     """Write an encrypted PKCS#12 bundle and (by default) read it back."""
     if not password:
@@ -63,25 +68,44 @@ def write_pkcs12(
             "refusing to write a PKCS#12 file: the certificate's public key does not match the private key"
         )
     chain = _ordered_chain(certificate, chain or [])
+    name = (friendly_name or certs.common_name(certificate.subject))[:64]
     try:
-        blob = pkcs12.serialize_key_and_certificates(
-            name=(friendly_name or certs.common_name(certificate.subject))[:64].encode("utf-8"),
-            key=key,
-            cert=certificate,
-            cas=chain or None,
-            encryption_algorithm=BestAvailableEncryption(password.encode("utf-8")),
+        blob = encode_pkcs12(
+            key,
+            certificate,
+            chain,
+            password,
+            name,
+            iterations=iterations,
+            mac_iterations=mac_iterations,
+            mac_hash="sha256",
         )
+        if verify:
+            try:
+                bundle = read_pkcs12_bytes(blob, password)
+            except CryptoError:
+                # Very old readers may not know HmacPBESHA256.  The PBE stays
+                # PBES2/AES-256; only the integrity MAC falls back to SHA-1.
+                blob = encode_pkcs12(
+                    key,
+                    certificate,
+                    chain,
+                    password,
+                    name,
+                    iterations=iterations,
+                    mac_iterations=mac_iterations,
+                    mac_hash="sha1",
+                )
+                bundle = read_pkcs12_bytes(blob, password)
+            if certs.fingerprint(bundle.cert) != certs.fingerprint(certificate):
+                raise CryptoError("PKCS#12 verification failed after writing: certificate mismatch")
+            if not certs.public_keys_equal(bundle.cert, key.public_key()):
+                raise CryptoError("PKCS#12 verification failed after writing: key mismatch")
     except (ValueError, TypeError) as exc:
         raise CryptoError(f"could not create PKCS#12 bundle: {exc}") from exc
     path = Path(path)
     ensure_dir(path.parent)
     atomic_write(path, blob, mode=SECRET_FILE_MODE)
-    if verify:
-        bundle = read_pkcs12_bytes(blob, password)
-        if certs.fingerprint(bundle.cert) != certs.fingerprint(certificate):
-            raise CryptoError("PKCS#12 verification failed after writing: certificate mismatch")
-        if not certs.public_keys_equal(bundle.cert, key.public_key()):
-            raise CryptoError("PKCS#12 verification failed after writing: key mismatch")
     return path
 
 
@@ -115,12 +139,12 @@ def read_pkcs12_bytes(data: bytes, password: str) -> P12Bundle:
     return P12Bundle(key, cert, chain)
 
 
-def _ordered_chain(leaf: x509.Certificate, candidates: list[x509.Certificate]) -> list[x509.Certificate]:
+def _ordered_chain(leaf: x509.Certificate, candidates: "list[x509.Certificate]") -> "list[x509.Certificate]":
     """Order issuer certificates leaf→root, dropping the leaf and duplicates."""
     leaf_fp = certs.fingerprint(leaf)
     pool = [c for c in candidates if certs.fingerprint(c) != leaf_fp]
-    ordered: list[x509.Certificate] = []
-    seen: set[str] = {leaf_fp}
+    ordered: "list[x509.Certificate]" = []
+    seen: "set[str]" = {leaf_fp}
     current = leaf
     while True:
         issuer = next(

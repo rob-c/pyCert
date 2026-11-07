@@ -5,8 +5,6 @@ the CLI can print a one-line message (and a traceback only with ``--debug``) and
 the GUI can show a clean dialog.  Unexpected exceptions are never swallowed.
 """
 
-from __future__ import annotations
-
 
 class PyCertError(Exception):
     """Base class for all pyCert errors."""
@@ -39,7 +37,7 @@ class NetworkError(PyCertError):
 class CAError(PyCertError):
     """The CA server rejected a request."""
 
-    def __init__(self, message: str, status: int | None = None, detail: str | None = None):
+    def __init__(self, message: str, status: "int | None" = None, detail: "str | None" = None):
         super().__init__(message)
         self.status = status
         self.detail = detail

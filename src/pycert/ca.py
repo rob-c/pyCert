@@ -29,26 +29,21 @@ Security properties pyCert adds on top of the Java client:
 * Error messages never include private key material, passphrases or PINs.
 """
 
-from __future__ import annotations
-
 import base64
-import http.client
-import random
 import socket
-import ssl
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from . import certs
-from .config import Config
+from .compat import dataclass, field, not_valid_after
 from .errors import CAError, CryptoError, NetworkError, ProtocolError
-from .util import clamp_text, format_fingerprint, normalize_fingerprint
+from .transport import Response, Transport, TransportConfig
+from .util import clamp_text, format_fingerprint
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_XML_BYTES = 4 * 1024 * 1024
@@ -82,22 +77,8 @@ class TLSPeer:
             "subject": self.subject,
             "issuer": self.issuer,
             "sha256_fingerprint": self.fingerprint,
-            "not_after": self.not_after.astimezone(UTC).isoformat(),
+            "not_after": self.not_after.astimezone(timezone.utc).isoformat(),
         }
-
-
-@dataclass
-class Response:
-    status: int
-    reason: str
-    headers: dict[str, str]
-    body: bytes
-
-    def text(self) -> str:
-        try:
-            return self.body.decode("utf-8")
-        except UnicodeDecodeError:
-            return self.body.decode("latin-1")
 
 
 @dataclass
@@ -129,7 +110,7 @@ class ServerCertificate:
     renew: str = ""
     pem: str = ""
 
-    def certificate(self) -> x509.Certificate | None:
+    def certificate(self) -> "x509.Certificate | None":
         if not self.pem:
             return None
         try:
@@ -149,16 +130,16 @@ class ServerCSR:
 
 @dataclass
 class Lookup:
-    certificates: list[ServerCertificate] = field(default_factory=list)
-    csrs: list[ServerCSR] = field(default_factory=list)
+    certificates: "list[ServerCertificate]" = field(default_factory=list)
+    csrs: "list[ServerCSR]" = field(default_factory=list)
     raw: str = ""
 
     @property
-    def latest_certificate(self) -> ServerCertificate | None:
+    def latest_certificate(self) -> "ServerCertificate | None":
         return self.certificates[-1] if self.certificates else None
 
     @property
-    def latest_csr(self) -> ServerCSR | None:
+    def latest_csr(self) -> "ServerCSR | None":
         return self.csrs[-1] if self.csrs else None
 
 
@@ -174,11 +155,11 @@ class RA:
 
 @dataclass
 class CAInfo:
-    certificates: list[x509.Certificate]
-    ras: list[RA]
-    preferred_ra: RA | None
-    policy: dict[str, str]
-    problems: list[str] = field(default_factory=list)
+    certificates: "list[x509.Certificate]"
+    ras: "list[RA]"
+    preferred_ra: "RA | None"
+    policy: "dict[str, str]"
+    problems: "list[str]" = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -186,154 +167,83 @@ class CAInfo:
 # ---------------------------------------------------------------------------
 
 
-class _CapturingHTTPSConnection(http.client.HTTPSConnection):
-    """HTTPSConnection that remembers the server certificate (for pinning)."""
-
-    def __init__(self, host, port, *, context, timeout):
-        super().__init__(host, port, timeout=timeout, context=context)
-        self.peer_certificate: bytes | None = None
-
-    def connect(self):  # noqa: D401 - http.client API
-        super().connect()
-        if self.sock is not None:
-            self.peer_certificate = self.sock.getpeercert(binary_form=True)
-
-
 class CAClient:
-    def __init__(self, config: Config):
+    """Client for one CA, using the hardened transport in :mod:`pycert.transport`."""
+
+    def __init__(self, config):
         self.config = config
         self.ca = config.ca
         self.base = urlsplit(self.ca.base_url)
         if self.base.scheme not in ("https", "http"):
-            raise NetworkError(f"unsupported URL scheme: {self.base.scheme}")
+            raise NetworkError("unsupported URL scheme: %s" % self.base.scheme)
         if self.base.scheme == "http" and not self.ca.allow_plaintext:
             raise NetworkError("refusing to use plaintext HTTP (set ca.allow_plaintext to override)")
-        self.last_tls: TLSPeer | None = None
-        self.last_url: str = ""
-        self.last_error: str = ""
+        self.last_tls = None
+        self.last_url = ""
+        self.last_error = ""
+        transport_config = TransportConfig(
+            connect_timeout=self.ca.connect_timeout,
+            read_timeout=self.ca.timeout,
+            deadline=self.ca.deadline,
+            dns_timeout=self.ca.dns_timeout,
+            retries=self.ca.retries,
+            max_redirects=self.ca.max_redirects,
+            max_body_bytes=self.ca.max_body_bytes,
+            max_header_bytes=self.ca.max_header_bytes,
+            backoff_base=self.ca.backoff_base,
+            backoff_cap=self.ca.backoff_cap,
+            user_agent=self.ca.user_agent,
+            allow_plaintext=self.ca.allow_plaintext,
+            tls_verify=self.ca.tls_verify,
+            tls_pem=self.config.tls_trust_pem(),
+            use_system_trust=self.config.use_system_trust(),
+            tls_pins=list(self.ca.tls_pin_sha256),
+        )
+        self.transport = Transport(transport_config)
 
-    # -- TLS ---------------------------------------------------------------
-    def _ssl_context(self) -> ssl.SSLContext:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        if not self.ca.tls_verify:
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            return context
-        context.verify_mode = ssl.CERT_REQUIRED
-        context.check_hostname = True
-        loaded = False
-        pem = self.config.tls_trust_pem()
-        if pem:
-            context.load_verify_locations(cadata=pem)
-            loaded = True
-        if self.config.use_system_trust():
-            context.load_default_certs()
-            loaded = True
-        if not loaded:
-            raise NetworkError(
-                "ca.tls_verify is enabled but no trust material is configured: add CA "
-                "certificates under [[chain.certificates]] or set ca.tls_trust = 'system'"
-            )
-        return context
-
-    def _peer_info(self, der: bytes) -> TLSPeer:
+    def _peer_info(self, der):
         cert = x509.load_der_x509_certificate(der)
         return TLSPeer(
-            subject=cert.subject.rfc4514_string(),
-            issuer=cert.issuer.rfc4514_string(),
+            subject=certs.name_to_string(cert.subject),
+            issuer=certs.name_to_string(cert.issuer),
             fingerprint=format_fingerprint(cert.fingerprint(certs.hash_algorithm("sha256"))),
-            not_after=cert.not_valid_after_utc,
+            not_after=not_valid_after(cert),
         )
-
-    def _check_pin(self, peer: TLSPeer) -> None:
-        if not self.ca.tls_pin_sha256:
-            return
-        actual = normalize_fingerprint(peer.fingerprint)
-        allowed = {normalize_fingerprint(p) for p in self.ca.tls_pin_sha256}
-        if actual not in allowed:
-            raise NetworkError(
-                "TLS certificate pin mismatch for the CA server: "
-                f"got {peer.fingerprint}, expected one of " + ", ".join(self.ca.tls_pin_sha256)
-            )
-
-    # -- requests ----------------------------------------------------------
-    def _connection(self, url: str):
-        parts = urlsplit(url)
-        if parts.scheme not in ("https", "http"):
-            raise NetworkError(f"unsupported URL scheme: {parts.scheme}")
-        host = parts.hostname or ""
-        if not host:
-            raise NetworkError(f"URL has no host: {url}")
-        port = parts.port or (443 if parts.scheme == "https" else 80)
-        if parts.scheme == "http" and not self.ca.allow_plaintext:
-            raise NetworkError("refusing to use plaintext HTTP (set ca.allow_plaintext to override)")
-        if parts.scheme == "http":
-            connection = http.client.HTTPConnection(host, port, timeout=self.ca.timeout)
-            return connection, (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
-        context = self._ssl_context()
-        connection = _CapturingHTTPSConnection(host, port, context=context, timeout=self.ca.timeout)
-        return connection, (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
 
     def request(
         self,
-        method: str,
-        url: str,
+        method,
+        url,
         *,
-        body: bytes | None = None,
-        headers: dict[str, str] | None = None,
-        retries: int | None = None,
-    ) -> Response:
-        retries = self.ca.retries if retries is None else retries
-        attempts = retries + 1 if method in ("GET", "HEAD") else 1
-        last_error: Exception | None = None
-        for attempt in range(attempts):
-            if attempt:
-                time.sleep(min(8.0, 0.4 * (2**attempt)) + random.uniform(0, 0.2))
-            try:
-                return self._request_once(method, url, body=body, headers=headers)
-            except (TimeoutError, ConnectionError, ssl.SSLError, http.client.HTTPException, OSError) as exc:
-                last_error = exc
-                if method not in ("GET", "HEAD"):
-                    break
-        detail = str(last_error) if last_error else "unknown error"
-        raise NetworkError(f"{method} {url} failed: {detail}")
-
-    def _request_once(
-        self,
-        method: str,
-        url: str,
-        *,
-        body: bytes | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> Response:
-        self.last_url = url
-        connection, path = self._connection(url)
-        request_headers = {
-            "User-Agent": self.ca.user_agent or USER_AGENT_FALLBACK,
-            "Accept": "application/xml, text/xml, */*",
-            "Connection": "close",
-        }
-        if body is not None:
-            request_headers["Content-Type"] = "application/xml; charset=utf-8"
-        request_headers.update(headers or {})
+        body=None,
+        headers=None,
+        idempotent=False,
+        stop_event=None,
+        deadline=None,
+    ):
+        self.last_error = ""
         try:
-            connection.connect()
-            if isinstance(connection, _CapturingHTTPSConnection) and connection.peer_certificate:
-                peer = self._peer_info(connection.peer_certificate)
-                self.last_tls = peer
-                self._check_pin(peer)
-            connection.request(method, path, body=body, headers=request_headers)
-            raw = connection.getresponse()
-            payload = raw.read(MAX_RESPONSE_BYTES + 1)
-            if len(payload) > MAX_RESPONSE_BYTES:
-                raise ProtocolError(
-                    f"response from {url} exceeds {MAX_RESPONSE_BYTES} bytes; refusing to buffer it"
-                )
-            response_headers = {k.lower(): v for k, v in raw.getheaders()}
-            return Response(raw.status, raw.reason, response_headers, payload)
+            response = self.transport.request(
+                method,
+                url,
+                body=body,
+                headers=headers,
+                idempotent=idempotent,
+                stop_event=stop_event,
+                deadline=deadline,
+            )
+        except NetworkError as exc:
+            self.last_error = str(exc)
+            raise
         finally:
-            connection.close()
+            der = self.transport.last_peer_certificate
+            if der:
+                try:
+                    self.last_tls = self._peer_info(der)
+                except Exception:  # noqa: BLE001 - a display detail, not a protocol error
+                    self.last_tls = None
+        self.last_url = url
+        return response
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
@@ -343,7 +253,7 @@ class CAClient:
         except OSError:  # pragma: no cover
             return socket.gethostname()
 
-    def _base_headers(self) -> dict[str, str]:
+    def _base_headers(self) -> "dict[str, str]":
         return {"LocalHost": self.local_host_header()}
 
     def _parse_xml(self, response: Response) -> ET.Element:
@@ -386,7 +296,7 @@ class CAClient:
         url = self.ca.url("ping")
         self.last_error = ""
         try:
-            response = self.request("GET", url, headers=self._base_headers())
+            response = self.request("GET", url, headers=self._base_headers(), idempotent=True)
         except NetworkError as exc:
             self.last_error = str(exc)
             return False
@@ -396,12 +306,12 @@ class CAClient:
 
     def info(self) -> CAInfo:
         url = self.ca.url("info")
-        response = self.request("GET", url, headers=self._base_headers())
+        response = self.request("GET", url, headers=self._base_headers(), idempotent=True)
         if response.status != 200:
             raise self._error(response, "reading CA information")
         root = self._parse_xml(response)
-        certificates: list[x509.Certificate] = []
-        problems: list[str] = []
+        certificates: "list[x509.Certificate]" = []
+        problems: "list[str]" = []
         for element in _iter_tags(root, "certificate"):
             text = (element.text or "").strip()
             if "BEGIN CERTIFICATE" not in text:
@@ -410,7 +320,7 @@ class CAClient:
                 certificates.append(certs.load_certificate(text.encode()))
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"could not parse a /CA certificate: {exc}")
-        ras: list[RA] = []
+        ras: "list[RA]" = []
         ra_list = _first_tag(root, "RAlist")
         # Only <ra> elements inside <RAlist>; <PreferredRA> has one too and must
         # not appear twice in the list.
@@ -438,7 +348,7 @@ class CAClient:
 
     def motd(self) -> str:
         url = self.ca.url("motd")
-        response = self.request("GET", url, headers=self._base_headers())
+        response = self.request("GET", url, headers=self._base_headers(), idempotent=True)
         if response.status != 200:
             raise self._error(response, "reading message of the day")
         text = response.text().strip()
@@ -459,7 +369,7 @@ class CAClient:
 
     # -- CSR submission ----------------------------------------------------
     @staticmethod
-    def _csr_xml(pem: str, pin_hash: str, email: str, version: str, public_key: str | None) -> bytes:
+    def _csr_xml(pem: str, pin_hash: str, email: str, version: str, public_key: "str | None") -> bytes:
         root = ET.Element("CSR")
         ET.SubElement(root, "Request").text = pem
         ET.SubElement(root, "PIN").text = pin_hash
@@ -467,7 +377,7 @@ class CAClient:
         if public_key:
             ET.SubElement(root, "PublicKey").text = public_key
         ET.SubElement(root, "Version").text = version
-        return ET.tostring(root, encoding="utf-8", xml_declaration=False)
+        return ET.tostring(root, encoding="utf-8")
 
     @staticmethod
     def _bulk_xml(pem: str, pin_hash: str, email: str, version: str) -> bytes:
@@ -477,7 +387,7 @@ class CAClient:
         ET.SubElement(csr, "PIN").text = pin_hash
         ET.SubElement(csr, "Email").text = email
         ET.SubElement(csr, "Version").text = version
-        return ET.tostring(root, encoding="utf-8", xml_declaration=False)
+        return ET.tostring(root, encoding="utf-8")
 
     def submit_csr(self, csr_pem: str, pin_hash: str, email: str) -> Submission:
         """Submit a new *user* certificate request (no client authentication)."""
@@ -501,7 +411,7 @@ class CAClient:
         auth_cert: x509.Certificate,
         auth_key,
         host_request: bool = False,
-        public_key: str | None = None,
+        public_key: "str | None" = None,
     ) -> Submission:
         """Submit a host CSR or a renewal using PPPK client authentication."""
         url = self.ca.url("bulk")
@@ -535,7 +445,9 @@ class CAClient:
                     "PPPK challenge is missing realm/nonce/keyid headers; the server may not "
                     "support client-certificate authentication for this resource"
                 )
-            response_value = pppk_response(auth_key, realm, nonce, keyid)
+            response_value = pppk_response(
+                auth_key, realm, nonce, keyid, timestamp_ms=self.transport.now_ms()
+            )
             retry_headers = dict(base_headers)
             retry_headers.update({"keyid": keyid, "realm": realm, "response": response_value})
             response = self.request("POST", url, body=body, headers=retry_headers)
@@ -546,12 +458,15 @@ class CAClient:
         raise self._error(response, "submitting authenticated CSR")
 
     # -- status / certificates --------------------------------------------
-    def lookup_public_key(self, spki_base64: str) -> Lookup:
+    def lookup_public_key(self, spki_base64: str, *, stop_event=None) -> Lookup:
         url = self.ca.url("lookup")
         root = ET.Element("PublicKey")
         root.text = spki_base64
         body = ET.tostring(root, encoding="utf-8")
-        response = self.request("POST", url, body=body, headers=self._base_headers())
+        # A lookup is safe to retry: it has no side effects.
+        response = self.request(
+            "POST", url, body=body, headers=self._base_headers(), idempotent=True, stop_event=stop_event
+        )
         if response.status == 404:
             return Lookup(raw=response.text())
         if response.status != 200:
@@ -585,11 +500,11 @@ class CAClient:
                 lookup.csrs.append(csr)
         return lookup
 
-    def download_certificate(self, cert_id: str) -> x509.Certificate:
+    def download_certificate(self, cert_id: str, *, stop_event=None) -> x509.Certificate:
         if not cert_id or not all(ch.isdigit() or ch.isalpha() or ch in "-_." for ch in cert_id):
             raise ProtocolError(f"refusing to use suspicious certificate id: {cert_id!r}")
         url = self.ca.url("certificate").rstrip("/") + "/" + cert_id
-        response = self.request("GET", url, headers=self._base_headers())
+        response = self.request("GET", url, headers=self._base_headers(), idempotent=True)
         if response.status != 200:
             raise self._error(response, f"downloading certificate {cert_id}")
         try:
@@ -639,7 +554,13 @@ class CAClient:
                 raise ProtocolError("PPPK challenge for revocation is missing realm/nonce/keyid")
             retry_headers = dict(headers)
             retry_headers.update(
-                {"keyid": keyid, "realm": realm, "response": pppk_response(auth_key, realm, nonce, keyid)}
+                {
+                    "keyid": keyid,
+                    "realm": realm,
+                    "response": pppk_response(
+                        auth_key, realm, nonce, keyid, timestamp_ms=self.transport.now_ms()
+                    ),
+                }
             )
             response = self.request("POST", url, body=body, headers=retry_headers)
         if response.status == 201:
@@ -656,7 +577,7 @@ class CAClient:
 # ---------------------------------------------------------------------------
 
 
-def pppk_response(private_key, realm: str, nonce: str, keyid: str, timestamp_ms: int | None = None) -> str:
+def pppk_response(private_key, realm: str, nonce: str, keyid: str, timestamp_ms: "int | None" = None) -> str:
     """Compute the PPPK challenge response.
 
     The server sends ``keyid`` = ``<modulus hex>.<public exponent hex>`` and a
@@ -722,7 +643,7 @@ def _iter_tags(root: ET.Element, name: str):
             yield element
 
 
-def _first_tag(root: ET.Element, name: str) -> ET.Element | None:
+def _first_tag(root: ET.Element, name: str) -> "ET.Element | None":
     for element in _iter_tags(root, name):
         return element
     return None

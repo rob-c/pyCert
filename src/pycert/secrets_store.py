@@ -25,18 +25,16 @@ preference:
 in the configuration so behaviour is reproducible.
 """
 
-from __future__ import annotations
-
 import getpass
 import json
 import os
 import platform
 import secrets
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
+from .compat import subprocess_run
 from .config import SecretConfig
 from .errors import SecretError
 from .util import atomic_write, check_private_permissions, ensure_dir, read_private_file
@@ -88,7 +86,7 @@ class SecretStore:
         return f"{self.backend} ({self.service}/{self.config.account})"
 
     # -- public API --------------------------------------------------------
-    def get(self, account: str | None = None, *, allow_missing: bool = False) -> str | None:
+    def get(self, account: "str | None" = None, *, allow_missing: bool = False) -> "str | None":
         account = account or self.config.account
         try:
             value = self._get(account)
@@ -105,20 +103,20 @@ class SecretStore:
             )
         return value
 
-    def set(self, value: str, account: str | None = None) -> None:
+    def set(self, value: str, account: "str | None" = None) -> None:
         if not value:
             raise SecretError("refusing to store an empty secret")
         account = account or self.config.account
         self._set(account, value)
 
-    def delete(self, account: str | None = None) -> bool:
+    def delete(self, account: "str | None" = None) -> bool:
         account = account or self.config.account
         return self._delete(account)
 
-    def exists(self, account: str | None = None) -> bool:
+    def exists(self, account: "str | None" = None) -> bool:
         return bool(self.get(account, allow_missing=True))
 
-    def ensure(self, account: str | None = None, *, length: int = 32) -> str:
+    def ensure(self, account: "str | None" = None, *, length: int = 32) -> str:
         """Return the saved secret, generating and storing one if absent."""
         account = account or self.config.account
         existing = self.get(account, allow_missing=True)
@@ -167,12 +165,12 @@ class SecretStore:
         except OSError as exc:
             raise SecretError(f"cannot write secret file {self.path}: {exc}") from exc
 
-    def _get(self, account: str) -> str | None:
+    def _get(self, account: str) -> "str | None":
         key = f"{self.service}/{account}"
         if self.backend == "file":
             return self._read_file().get(key)
         if self.backend == "keychain":
-            result = subprocess.run(
+            result = subprocess_run(
                 ["security", "find-generic-password", "-a", account, "-s", self.service, "-w"],
                 capture_output=True,
                 text=True,
@@ -188,7 +186,7 @@ class SecretStore:
                 )
             return result.stdout[:-1] if result.stdout.endswith("\n") else result.stdout
         if self.backend == "secret-service":
-            result = subprocess.run(
+            result = subprocess_run(
                 ["secret-tool", "lookup", "service", self.service, "account", account],
                 capture_output=True,
                 text=True,
@@ -197,7 +195,7 @@ class SecretStore:
                 return None
             return result.stdout.rstrip("\n")
         if self.backend == "command":
-            result = subprocess.run(self.config.command, shell=True, capture_output=True, text=True)
+            result = subprocess_run(self.config.command, shell=True, capture_output=True, text=True)
             if result.returncode != 0:
                 return None
             value = result.stdout.strip()
@@ -230,7 +228,7 @@ class SecretStore:
                     f"{''.join(sorted(bad))!r}; use a generated secret or another backend"
                 )
             command = f'add-generic-password -U -a {_quote(account)} -s {_quote(self.service)} -w "{value}"\n'
-            result = subprocess.run(["security", "-i"], input=command, capture_output=True, text=True)
+            result = subprocess_run(["security", "-i"], input=command, capture_output=True, text=True)
             if result.returncode != 0:
                 raise SecretError(
                     "could not store the secret in the keychain "
@@ -238,7 +236,7 @@ class SecretStore:
                 )
             return
         if self.backend == "secret-service":
-            result = subprocess.run(
+            result = subprocess_run(
                 [
                     "secret-tool",
                     "store",
@@ -256,7 +254,7 @@ class SecretStore:
                 raise SecretError(f"secret-tool failed: {result.stderr.strip()}")
             return
         if self.backend == "command":
-            result = subprocess.run(
+            result = subprocess_run(
                 self.config.command, shell=True, input=value, text=True, capture_output=True
             )
             if result.returncode != 0:
@@ -278,14 +276,14 @@ class SecretStore:
             self._write_file(data)
             return True
         if self.backend == "keychain":
-            result = subprocess.run(
+            result = subprocess_run(
                 ["security", "delete-generic-password", "-a", account, "-s", self.service],
                 capture_output=True,
                 text=True,
             )
             return result.returncode == 0
         if self.backend == "secret-service":
-            result = subprocess.run(
+            result = subprocess_run(
                 ["secret-tool", "clear", "service", self.service, "account", account],
                 capture_output=True,
                 text=True,

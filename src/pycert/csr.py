@@ -11,16 +11,14 @@ produced, with the parts that were dangerous or missing fixed:
   that honour CSR extensions.
 """
 
-from __future__ import annotations
-
 import ipaddress
-from dataclasses import dataclass
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID
 
 from . import certs
+from .compat import csr_signature_valid, dataclass
 from .errors import CryptoError
 
 DEFAULT_HASH = "sha256"
@@ -54,10 +52,10 @@ def build_csr(
     *,
     cert_type: str = "user",
     email: str = "",
-    dns_names: list[str] | None = None,
-    email_names: list[str] | None = None,
-    ip_addresses: list[str] | None = None,
-    extensions: list[str] | None = None,
+    dns_names: "list[str] | None" = None,
+    email_names: "list[str] | None" = None,
+    ip_addresses: "list[str] | None" = None,
+    extensions: "list[str] | None" = None,
     hash_name: str = DEFAULT_HASH,
 ) -> x509.CertificateSigningRequest:
     """Build and sign a PKCS#10 request.
@@ -79,7 +77,7 @@ def build_csr(
     builder = x509.CertificateSigningRequestBuilder().subject_name(subject)
 
     # Subject alternative names -------------------------------------------------
-    general_names: list[x509.GeneralName] = []
+    general_names: "list[x509.GeneralName]" = []
     for name in dns_names or []:
         general_names.append(x509.DNSName(name))
     if cert_type == "host" and not general_names:
@@ -87,10 +85,14 @@ def build_csr(
         if not cn:
             raise CryptoError("host certificate request needs a common name")
         general_names.append(x509.DNSName(cn))
-    for name in email_names or []:
-        general_names.append(x509.RFC822Name(name))
-    if cert_type == "user" and email and not email_names:
+    # For user certificates the contact e-mail is always part of the SAN (the
+    # CA checks it against the <Email> element); extra e-mail SANs follow.
+    if cert_type == "user" and email:
         general_names.append(x509.RFC822Name(email))
+    for name in email_names or []:
+        if cert_type == "user" and name == email:
+            continue
+        general_names.append(x509.RFC822Name(name))
     for value in ip_addresses or []:
         general_names.append(x509.IPAddress(ipaddress.ip_address(value)))
     if general_names:
@@ -142,19 +144,7 @@ def build_csr(
 
 
 def signature_valid(csr: x509.CertificateSigningRequest) -> bool:
-    try:
-        return csr.is_signature_valid
-    except AttributeError:  # pragma: no cover - older cryptography
-        try:
-            csr.public_key().verify(
-                csr.signature,
-                csr.tbs_certrequest_bytes,
-                csr.signature_algorithm_parameters,
-                csr.signature_hash_algorithm,
-            )
-            return True
-        except Exception:  # noqa: BLE001
-            return False
+    return csr_signature_valid(csr)
 
 
 @dataclass
@@ -162,7 +152,7 @@ class CSRSummary:
     subject: str
     key: str
     signature: str
-    sans: list[str]
+    sans: "list[str]"
     signature_valid: bool
 
     def as_dict(self) -> dict:
@@ -176,7 +166,7 @@ class CSRSummary:
 
 
 def summarize(csr: x509.CertificateSigningRequest) -> CSRSummary:
-    sans: list[str] = []
+    sans: "list[str]" = []
     try:
         extension = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     except x509.ExtensionNotFound:
@@ -188,7 +178,7 @@ def summarize(csr: x509.CertificateSigningRequest) -> CSRSummary:
     return CSRSummary(
         subject=csr.subject.rfc4514_string(),
         key=certs.key_description(csr.public_key()),
-        signature=csr.signature_algorithm_oid._name,
+        signature=getattr(csr.signature_algorithm_oid, "_name", csr.signature_algorithm_oid.dotted_string),
         sans=sans,
         signature_valid=signature_valid(csr),
     )

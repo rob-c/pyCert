@@ -1,7 +1,5 @@
 """Small shared helpers: atomic file writes, permissions, formatting."""
 
-from __future__ import annotations
-
 import contextlib
 import hashlib
 import os
@@ -9,9 +7,10 @@ import re
 import stat
 import tempfile
 import unicodedata
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .compat import parse_iso_datetime
 from .errors import PyCertError
 
 # Directory/file modes used everywhere.  The private key and the PKCS#12 file
@@ -24,22 +23,24 @@ PUBLIC_FILE_MODE = 0o644
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
-def iso(when: datetime | None = None) -> str:
-    return (when or utcnow()).astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+def iso(when: "datetime | None" = None) -> str:
+    return (
+        (when or utcnow()).astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
 
 
 def parse_iso(text: str) -> datetime:
-    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return parse_iso_datetime(text)
 
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def format_fingerprint(digest: bytes | str, sep: str = ":") -> str:
+def format_fingerprint(digest: "bytes | str", sep: str = ":") -> str:
     if isinstance(digest, str):
         hexstr = digest.replace(":", "").replace(" ", "").lower()
         if len(hexstr) % 2:
@@ -76,7 +77,7 @@ def ensure_dir(path: Path, mode: int = DIR_MODE) -> Path:
     return path
 
 
-def atomic_write(path: Path, data: bytes | str, mode: int = SECRET_FILE_MODE) -> Path:
+def atomic_write(path: Path, data: "bytes | str", mode: int = SECRET_FILE_MODE) -> Path:
     """Write *path* atomically with explicit permissions.
 
     The temporary file is created in the destination directory so that
@@ -90,7 +91,11 @@ def atomic_write(path: Path, data: bytes | str, mode: int = SECRET_FILE_MODE) ->
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as handle:
-            os.fchmod(handle.fileno(), mode)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(handle.fileno(), mode)
+            else:  # pragma: no cover - Windows
+                os.chmod(tmp, mode)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
@@ -109,7 +114,7 @@ def read_private_file(path: Path) -> bytes:
     return data
 
 
-def check_private_permissions(path: Path) -> list[str]:
+def check_private_permissions(path: Path) -> "list[str]":
     """Return a list of warnings about insecure permissions on *path*."""
     warnings = []
     try:

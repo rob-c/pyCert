@@ -89,13 +89,19 @@ this and is deliberately verbose about the risk.
   are available for ordinary user requests. MD5/SHA-1 **signatures** are refused.
 * Private keys are stored as encrypted PKCS#8 (`BestAvailableEncryption`, i.e.
   PBES2 with a strong KDF) with mode 0600 in a 0700 directory.
-* The exported PKCS#12 uses `cryptography`’s OpenSSL-backed serialisation:
-  PBES2, PBKDF2-HMAC-SHA256, AES-256-CBC for the certificate and key bags, and
-  an HMAC-SHA-256 integrity MAC. This is readable by OpenSSL 3, Java 11+,
-  macOS Keychain, Firefox and Windows.
+* The exported PKCS#12 is written by pyCert's own container encoder using
+  `cryptography` primitives: PBES2, PBKDF2-HMAC-SHA256 (100,000 iterations),
+  AES-256-CBC for the key bag and encrypted SafeContents, and an HMAC-SHA-256
+  integrity MAC.  This is deliberately independent of the OpenSSL version
+  linked into `cryptography`, because older releases would otherwise write
+  legacy PBE-SHA1-3DES/SHA-1 files.  A SHA-1 MAC fallback is used only if the
+  installed reader cannot verify HMAC-SHA-256; the encryption stays AES-256.
+  The output is readable by OpenSSL 3, Java 11+, macOS Keychain, Firefox and
+  Windows.
 * The PKCS#12 passphrase is generated with `secrets.token_urlsafe(32)` (256 bits
   of entropy) when pyCert creates it, so the KDF iteration count is not the
-  limiting factor. If you supply your own weak passphrase, that is on you; the
+  limiting factor.  The MAC key is derived with the RFC 7292 KDF and validated
+  against published test vectors. If you supply your own weak passphrase, that is on you; the
   `import`/`export` commands accept one for interoperability.
 * CertWizard’s export path used Java’s default provider and had a documented
   7-character password limit and legacy PBE ciphers. pyCert’s default is modern;
@@ -147,6 +153,27 @@ someone who can read your home directory (backups, sync clients, root). Use
   `previous/<timestamp>/` with the same 0600/0700 permissions. Deleting a request
   removes the directory recursively; nothing is copied elsewhere.
 
+## Network hardening
+
+The transport is written for a hostile network and is covered by fault-injection
+tests (`tests/test_transport.py`):
+
+* **total deadlines** per request, checked between body chunks, with socket
+  timeouts set to the smaller of the read timeout and the remaining deadline;
+* **DNS timeouts** and a positive cache; resolver errors are classified as
+  `dns` rather than surfacing as opaque connection failures;
+* **strict framing**: declared vs actual body length, chunked encoding, status
+  line, header count/size, `Content-Encoding: identity`; truncation and
+  oversized data are errors;
+* **retry policy**: idempotent requests only, exponential backoff with full
+  jitter, `Retry-After` support and a cap; POST submissions and revocations are
+  never retried, so a duplicate CSR cannot be created by a retry;
+* **redirect policy**: same host, same scheme, GET/HEAD only, bounded count,
+  loop detection; cross-host and plaintext redirects are refused;
+* **cancellation** via an event checked before connecting and between body
+  chunks;
+* **clock skew correction** from the server's `Date` header for PPPK timestamps.
+
 ## Network surface
 
 * Only HTTPS requests to URLs derived from `ca.base_url` and the configured
@@ -159,7 +186,8 @@ someone who can read your home directory (backups, sync clients, root). Use
 * Response bodies are capped at 8 MiB; XML at 4 MiB; DOCTYPE and ENTITY
   declarations are rejected (entity-expansion and XXE defence).
 * Error messages include the server's `<text>` elements, HTTP status and the URL
-  path. They never include key material, passphrases or the PIN.
+  host/path. They never include request header values, key material,
+  passphrases or the PIN.
 
 ## Logging
 
@@ -185,6 +213,14 @@ opinions:
 | No automated polling | `--wait`, `wait`, `status --refresh`, cron/launchd examples |
 | XML parsing via DocumentBuilder without hardening | DOCTYPE/ENTITY rejected, size limits |
 | Error messages occasionally include raw exception dumps | typed errors, one-line messages, `--debug` for tracebacks |
+
+## Python 3.6
+
+pyCert supports Python 3.6 by using its own TOML parser, a tested dataclasses
+fallback and compatibility shims for old `cryptography` releases.  Python 3.6 is
+end-of-life and the newest compatible `cryptography` is 3.3.x, which no longer
+receives fixes.  `pycert doctor` warns about this.  Run pyCert on a supported
+Python for anything security-sensitive.
 
 ## Reporting a vulnerability
 

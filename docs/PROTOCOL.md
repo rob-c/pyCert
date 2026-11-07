@@ -15,6 +15,16 @@ CA changes, this is the file to update.
 * The live server’s certificate chains to `CN=UK e-Science CA 2B`, which chains
   to `CN=UK e-Science Root`; both are in the bundled chain.
 
+## Transport policy
+
+pyCert does not use a general-purpose HTTP library for CA calls.  The transport
+(`pycert/transport.py`) enforces total deadlines, bounded DNS and connect
+attempts, strict response framing (length/chunk validation, header and body
+limits), retries only for idempotent requests, same-host redirects only, and
+cancellation.  The status lookup is an idempotent POST; CSR submission and
+revocation are not.  See the README for the configuration knobs and
+`tests/test_transport.py` for the failure matrix.
+
 ## Endpoints
 
 | Method | Path | Purpose |

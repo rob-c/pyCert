@@ -2,13 +2,14 @@ PYTHON ?= python3
 VENV ?= .venv
 BIN := $(VENV)/bin
 
-.PHONY: help venv install dev test lint format check build clean
+.PHONY: help venv install dev test lint format check check-py36 selftest build clean
 
 help:
 	@echo "make venv      create the virtualenv and install pyCert (editable)"
 	@echo "make dev       venv + test tooling"
 	@echo "make test      run the test suite"
 	@echo "make lint      ruff check"
+	@echo "make check-py36 Python 3.6 grammar/runtime checks (vermin + custom)"
 	@echo "make format    ruff format + check"
 	@echo "make build     build a wheel and sdist in dist/"
 	@echo "make clean     remove caches and build artefacts"
@@ -29,11 +30,18 @@ test:
 lint:
 	$(BIN)/ruff check src tests
 
+check-py36:
+	$(BIN)/python tools/check_py36.py .
+	$(BIN)/vermin -t=3.6- --no-tips --violations src/pycert
+
+selftest:
+	$(BIN)/pycert selftest
+
 format:
 	$(BIN)/ruff format src tests
 	$(BIN)/ruff check --fix src tests
 
-check: lint test
+check: lint check-py36 test
 
 build: dev
 	$(BIN)/pip install build

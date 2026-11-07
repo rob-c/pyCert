@@ -138,7 +138,8 @@ setting produces an error dialog and nothing is changed.
 * Closing the window cancels a wait cooperatively; an in-flight HTTP request is
   allowed to time out (default 30 s).
 * Starting the GUI pings the CA once and shows “CA online” or “CA unreachable”
-  in the header. Use **Tools → Ping the CA** to retry.
+  in the header. Use **Tools → Ping the CA** to retry, and **Tools → Run
+  diagnostics (doctor)** for a full configuration/chain/TLS/permissions report.
 * The GUI uses the same configuration, store and secret backend as the CLI, so
   you can start a request in one and finish it in the other.
 

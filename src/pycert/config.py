@@ -17,20 +17,18 @@ OS secret store (or a 0600 file, or an external command); see
 :mod:`pycert.secrets_store`.
 """
 
-from __future__ import annotations
-
 import os
 import re
-import tomllib
-from collections.abc import Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from cryptography import x509
 
 from . import bundled, certs
+from .compat import dataclass, field
 from .errors import ConfigError
+from .toml import TOMLDecodeError
+from .toml import loads as toml_loads
 from .util import ensure_dir, normalize_fingerprint
 
 DEFAULT_BASE_URL = "https://cwiz-live.ca.ngs.ac.uk:443"
@@ -61,11 +59,19 @@ class CAConfig:
     base_url: str = DEFAULT_BASE_URL
     version_string: str = DEFAULT_VERSION_STRING
     user_agent: str = DEFAULT_USER_AGENT
-    timeout: float = 30.0
-    retries: int = 2
+    timeout: float = 30.0  # socket read timeout (seconds)
+    connect_timeout: float = 10.0
+    deadline: float = 90.0  # total time per request attempt
+    dns_timeout: float = 10.0
+    retries: int = 2  # idempotent requests only
+    max_redirects: int = 2  # same-host redirects, GET/HEAD only
+    max_body_bytes: int = 8 * 1024 * 1024
+    max_header_bytes: int = 128 * 1024
+    backoff_base: float = 0.4
+    backoff_cap: float = 8.0
     tls_verify: bool = True
     tls_trust: str = "chain"  # chain | system | both
-    tls_pin_sha256: list[str] = field(default_factory=list)
+    tls_pin_sha256: "list[str]" = field(default_factory=list)
     allow_plaintext: bool = False
     allow_sha1: bool = False
     endpoints: Endpoints = field(default_factory=Endpoints)
@@ -95,7 +101,7 @@ class KeyConfig:
 @dataclass
 class CSRConfig:
     hash: str = "sha256"
-    extensions: list[str] = field(default_factory=lambda: ["san"])
+    extensions: "list[str]" = field(default_factory=lambda: ["san"])
     pin_hash: str = "sha1"  # the current CA server hashes PINs with SHA-1
 
 
@@ -126,12 +132,12 @@ class SecretConfig:
 @dataclass
 class ChainEntry:
     label: str = ""
-    file: str | None = None
-    pem: str | None = None
-    sha256: str | None = None
+    file: "str | None" = None
+    pem: "str | None" = None
+    sha256: "str | None" = None
     anchor: bool = True
 
-    def resolved_path(self, base: Path) -> Path | None:
+    def resolved_path(self, base: Path) -> "Path | None":
         if self.file is None:
             return None
         path = Path(os.path.expandvars(os.path.expanduser(self.file)))
@@ -142,13 +148,13 @@ class ChainEntry:
 class ChainBundle:
     """CA chain loaded from the configuration, with pin checking applied."""
 
-    certificates: list[x509.Certificate]
-    anchors: list[x509.Certificate]
-    sources: list[str]
+    certificates: "list[x509.Certificate]"
+    anchors: "list[x509.Certificate]"
+    sources: "list[str]"
 
     def __post_init__(self) -> None:
-        seen: set[str] = set()
-        unique: list[x509.Certificate] = []
+        seen: "set[str]" = set()
+        unique: "list[x509.Certificate]" = []
         for cert in self.certificates:
             fp = certs.fingerprint(cert)
             if fp not in seen:
@@ -175,7 +181,7 @@ def _expect_bool(table: dict, key: str, default: bool, where: str) -> bool:
     return value
 
 
-def _expect_list(table: dict, key: str, default: list[str], where: str) -> list[str]:
+def _expect_list(table: dict, key: str, default: "list[str]", where: str) -> "list[str]":
     value = table.get(key, default)
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ConfigError(f"{where}.{key}: expected a list of strings")
@@ -203,8 +209,8 @@ class Config:
         p12: P12Config,
         paths: PathsConfig,
         secrets: SecretConfig,
-        chain: list[ChainEntry],
-        warnings: list[str] | None = None,
+        chain: "list[ChainEntry]",
+        warnings: "list[str] | None" = None,
     ):
         self.path = path
         self.profile = profile
@@ -217,7 +223,7 @@ class Config:
         self.secrets = secrets
         self.chain = chain
         self.warnings = warnings or []
-        self._bundle: ChainBundle | None = None
+        self._bundle: "ChainBundle | None" = None
 
     # -- paths -------------------------------------------------------------
     @property
@@ -240,9 +246,9 @@ class Config:
         return self._bundle
 
     def load_chain(self) -> ChainBundle:
-        loaded: list[x509.Certificate] = []
-        anchors: list[x509.Certificate] = []
-        sources: list[str] = []
+        loaded: "list[x509.Certificate]" = []
+        anchors: "list[x509.Certificate]" = []
+        sources: "list[str]" = []
         for index, entry in enumerate(self.chain):
             where = f"chain.certificates[{index}]"
             if entry.pem:
@@ -283,7 +289,7 @@ class Config:
 
     def tls_trust_pem(self) -> str:
         """PEM used to verify the CA server's TLS certificate."""
-        parts: list[str] = []
+        parts: "list[str]" = []
         if self.ca.tls_trust in ("chain", "both") and self.bundle.anchors:
             parts.append(self.bundle.anchor_pem())
         return "".join(parts)
@@ -310,15 +316,18 @@ class Config:
         if not hasattr(target, key):
             raise ConfigError(f"unknown setting: {dotted}")
         expected = type(getattr(target, key))
-        if expected is bool:
-            if isinstance(value, str):
-                value = value.lower() in ("1", "true", "yes", "on")
-        elif expected is int and isinstance(value, str):
-            value = int(value)
-        elif expected is float and isinstance(value, str):
-            value = float(value)
-        elif expected is list:
-            value = _parse_list_value(dotted, value)
+        try:
+            if expected is bool:
+                if isinstance(value, str):
+                    value = value.lower() in ("1", "true", "yes", "on")
+            elif expected is int and isinstance(value, str):
+                value = int(value)
+            elif expected is float and isinstance(value, str):
+                value = float(value)
+            elif expected is list:
+                value = _parse_list_value(dotted, value)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"{dotted}: {exc}") from exc
         if expected is not str and not isinstance(value, expected) and expected is not bool:
             raise ConfigError(f"{dotted}: expected {expected.__name__}")
         setattr(target, key, value)
@@ -333,7 +342,15 @@ class Config:
                 "version_string": self.ca.version_string,
                 "user_agent": self.ca.user_agent,
                 "timeout": self.ca.timeout,
+                "connect_timeout": self.ca.connect_timeout,
+                "deadline": self.ca.deadline,
+                "dns_timeout": self.ca.dns_timeout,
                 "retries": self.ca.retries,
+                "max_redirects": self.ca.max_redirects,
+                "max_body_bytes": self.ca.max_body_bytes,
+                "max_header_bytes": self.ca.max_header_bytes,
+                "backoff_base": self.ca.backoff_base,
+                "backoff_cap": self.ca.backoff_cap,
                 "tls_verify": self.ca.tls_verify,
                 "tls_trust": self.ca.tls_trust,
                 "tls_pin_sha256": self.ca.tls_pin_sha256,
@@ -399,7 +416,7 @@ class Config:
         }
 
 
-def _parse_list_value(key: str, value) -> list[str]:
+def _parse_list_value(key: str, value) -> "list[str]":
     """Accept a list, a JSON array or a comma-separated string for list settings."""
     if isinstance(value, list):
         return [str(item) for item in value]
@@ -454,7 +471,7 @@ def default_data_dir() -> str:
     return str(Path.home() / ".local" / "share" / "pycert")
 
 
-def default_config_paths() -> list[Path]:
+def default_config_paths() -> "list[Path]":
     """Where pyCert looks for a configuration, in order.
 
     The current working directory is deliberately *not* searched: a pycert.toml
@@ -471,7 +488,7 @@ def default_config_paths() -> list[Path]:
     return paths
 
 
-def find_config(explicit: str | Path | None = None) -> Path:
+def find_config(explicit: "str | Path | None" = None) -> Path:
     if explicit:
         path = _expand_path(str(explicit))
         if not path.is_file():
@@ -484,16 +501,16 @@ def find_config(explicit: str | Path | None = None) -> Path:
     raise ConfigError(f"no configuration file found.\nSearched: {searched}\nRun 'pycert init' to create one.")
 
 
-def load_config(explicit: str | Path | None = None) -> Config:
+def load_config(explicit: "str | Path | None" = None) -> Config:
     path = find_config(explicit)
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
+        data = toml_loads(path.read_text(encoding="utf-8"))
+    except TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     except OSError as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
 
-    warnings: list[str] = []
+    warnings: "list[str]" = []
     version = data.get("version", 1)
     if version != CONFIG_VERSION:
         warnings.append(f"configuration version {version} is not the supported version {CONFIG_VERSION}")
@@ -506,7 +523,15 @@ def load_config(explicit: str | Path | None = None) -> Config:
         version_string=_get_str(ca_data, "version_string", DEFAULT_VERSION_STRING, "ca"),
         user_agent=_get_str(ca_data, "user_agent", DEFAULT_USER_AGENT, "ca"),
         timeout=_get_float(ca_data, "timeout", 30.0, "ca"),
+        connect_timeout=_get_float(ca_data, "connect_timeout", 10.0, "ca"),
+        deadline=_get_float(ca_data, "deadline", 90.0, "ca"),
+        dns_timeout=_get_float(ca_data, "dns_timeout", 10.0, "ca"),
         retries=_get_int(ca_data, "retries", 2, "ca"),
+        max_redirects=_get_int(ca_data, "max_redirects", 2, "ca"),
+        max_body_bytes=_get_int(ca_data, "max_body_bytes", 8 * 1024 * 1024, "ca"),
+        max_header_bytes=_get_int(ca_data, "max_header_bytes", 128 * 1024, "ca"),
+        backoff_base=_get_float(ca_data, "backoff_base", 0.4, "ca"),
+        backoff_cap=_get_float(ca_data, "backoff_cap", 8.0, "ca"),
         tls_verify=_expect_bool(ca_data, "tls_verify", True, "ca"),
         tls_trust=_get_str(ca_data, "tls_trust", "chain", "ca"),
         tls_pin_sha256=_expect_list(ca_data, "tls_pin_sha256", [], "ca"),
@@ -572,7 +597,7 @@ def load_config(explicit: str | Path | None = None) -> Config:
     )
 
     chain_data = _section(data, "chain", "chain")
-    entries: list[ChainEntry] = []
+    entries: "list[ChainEntry]" = []
     raw_entries = chain_data.get("certificates", [])
     if not isinstance(raw_entries, list):
         raise ConfigError("chain.certificates: expected an array of tables")
@@ -618,10 +643,36 @@ def validate_config(config: Config) -> None:
 def _validate(config: Config) -> None:
     if config.ca.tls_trust not in ("chain", "system", "both"):
         raise ConfigError("ca.tls_trust must be 'chain', 'system' or 'both'")
+    if not 0 < config.ca.timeout <= 300:
+        raise ConfigError("ca.timeout must be between 0 and 300 seconds")
+    if not 0 < config.ca.connect_timeout <= 300:
+        raise ConfigError("ca.connect_timeout must be between 0 and 300 seconds")
+    if not 0 < config.ca.deadline <= 3600:
+        raise ConfigError("ca.deadline must be between 0 and 3600 seconds")
+    if not 0 < config.ca.dns_timeout <= 120:
+        raise ConfigError("ca.dns_timeout must be between 0 and 120 seconds")
+    if not 0 <= config.ca.retries <= 10:
+        raise ConfigError("ca.retries must be between 0 and 10")
+    if not 0 <= config.ca.max_redirects <= 10:
+        raise ConfigError("ca.max_redirects must be between 0 and 10")
+    if not 1024 <= config.ca.max_body_bytes <= 64 * 1024 * 1024:
+        raise ConfigError("ca.max_body_bytes must be between 1 KiB and 64 MiB")
+    if not 1024 <= config.ca.max_header_bytes <= 1024 * 1024:
+        raise ConfigError("ca.max_header_bytes must be between 1 KiB and 1 MiB")
+    if not 0 <= config.ca.backoff_base <= 10:
+        raise ConfigError("ca.backoff_base must be between 0 and 10 seconds")
+    if not 0 < config.ca.backoff_cap <= 60:
+        raise ConfigError("ca.backoff_cap must be between 0 and 60 seconds")
+    if config.ca.deadline < config.ca.timeout:
+        config.warnings.append(
+            "ca.deadline is smaller than ca.timeout; a slow response may hit the deadline first"
+        )
     if not config.ca.tls_verify:
         config.warnings.append("ca.tls_verify = false: the CA server's TLS certificate will NOT be verified")
-    if config.ca.allow_plaintext and not config.ca.base_url.startswith("http://"):
-        config.warnings.append("ca.allow_plaintext is set but base_url is not http://")
+    if config.ca.allow_plaintext:
+        config.warnings.append(
+            "ca.allow_plaintext is enabled: HTTP traffic is not confidential or authenticated"
+        )
     if config.ca.base_url.startswith("http://") and not config.ca.allow_plaintext:
         raise ConfigError(
             "ca.base_url uses http:// but ca.allow_plaintext is false.\n"
@@ -697,7 +748,7 @@ def _toml_list(values: Sequence[str]) -> str:
 
 
 def render_config(config: Config, *, chain_comments: bool = True) -> str:
-    lines: list[str] = [_HEADER]
+    lines: "list[str]" = [_HEADER]
     lines.append(f"version = {CONFIG_VERSION}")
     lines.append(f"profile = {_q(config.profile)}")
     lines.append("")
@@ -707,7 +758,17 @@ def render_config(config: Config, *, chain_comments: bool = True) -> str:
     lines.append(f"version_string = {_q(config.ca.version_string)}")
     lines.append(f"user_agent = {_q(config.ca.user_agent)}")
     lines.append(f"timeout = {config.ca.timeout!r}")
+    lines.append("# Networking hardening: every request has a deadline; DNS and connect")
+    lines.append("# attempts are bounded; only idempotent requests are retried.")
+    lines.append(f"connect_timeout = {config.ca.connect_timeout!r}")
+    lines.append(f"deadline = {config.ca.deadline!r}")
+    lines.append(f"dns_timeout = {config.ca.dns_timeout!r}")
     lines.append(f"retries = {config.ca.retries}")
+    lines.append(f"max_redirects = {config.ca.max_redirects}")
+    lines.append(f"max_body_bytes = {config.ca.max_body_bytes}")
+    lines.append(f"max_header_bytes = {config.ca.max_header_bytes}")
+    lines.append(f"backoff_base = {config.ca.backoff_base!r}")
+    lines.append(f"backoff_cap = {config.ca.backoff_cap!r}")
     lines.append("# Verify the server's TLS certificate. Never turn this off in production.")
     lines.append(f"tls_verify = {str(config.ca.tls_verify).lower()}")
     lines.append("# 'chain' uses the CA chain below as TLS trust anchors, 'system' uses the OS")
@@ -810,8 +871,8 @@ def write_config(path: Path, config: Config) -> Path:
     text = render_config(config)
     # Round-trip check: never write a configuration that will not load.
     try:
-        tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:  # pragma: no cover - defensive
+        toml_loads(text)
+    except TOMLDecodeError as exc:  # pragma: no cover - defensive
         raise ConfigError(f"internal error rendering configuration: {exc}") from exc
     atomic_write(path, text, mode=0o644)
     return path
@@ -830,7 +891,7 @@ _BUNDLED_LABELS = {
 }
 
 
-def bundle_chain_entries() -> list[ChainEntry]:
+def bundle_chain_entries() -> "list[ChainEntry]":
     """Chain entries pointing at the bundled certificates, with pins."""
     return [
         ChainEntry(label=_BUNDLED_LABELS.get(name, name), file=f"chain/{name}", sha256=pin)

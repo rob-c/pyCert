@@ -9,19 +9,17 @@ The fingerprints were cross-checked against the IGTF accredited distribution and
 the CA's own publication at https://ca.grid-support.ac.uk/cacerts/.
 """
 
-from __future__ import annotations
-
-import importlib.resources
 from functools import lru_cache
 from pathlib import Path
 
 from cryptography import x509
 
 from . import certs
+from .compat import package_data_dir
 from .errors import ConfigError
 
 #: file name -> expected SHA-256 fingerprint of the certificate (lower-case hex)
-PINNED: dict[str, str] = {
+PINNED: "dict[str, str]" = {
     # C=UK, O=eScienceRoot, OU=Authority, CN=UK e-Science Root (2007-2027, RSA)
     "escience-root.pem": "76f3a5942e22012d7e10e11b416fb2eea21d8f4583f2d2fc799bd4ced0210323",
     # C=UK, O=eScienceCA, OU=Authority, CN=UK e-Science CA 2B (2011-2027, RSA)
@@ -35,7 +33,7 @@ PINNED: dict[str, str] = {
 
 def data_dir() -> Path:
     """Filesystem path of the bundled certificate directory (for copying)."""
-    return Path(str(importlib.resources.files("pycert").joinpath("data/ca")))
+    return Path(package_data_dir())
 
 
 def path_for(name: str) -> Path:
@@ -43,7 +41,7 @@ def path_for(name: str) -> Path:
 
 
 @lru_cache(maxsize=1)
-def certificates() -> tuple[x509.Certificate, ...]:
+def certificates() -> "tuple[x509.Certificate, ...]":
     """Load and pin-check every bundled CA certificate."""
     result = []
     for name, expected in PINNED.items():

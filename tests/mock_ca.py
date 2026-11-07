@@ -18,16 +18,26 @@ signature families in pyCert's chain builder.
 Nothing here is meant to be secure; it is a test double.
 """
 
-from __future__ import annotations
-
 import base64
 import datetime as dt
 import ipaddress
 import ssl
 import threading
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from pycert import certs
+from pycert.compat import csr_signature_valid, dataclass, not_valid_after, not_valid_before
+
+try:
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+except ImportError:  # Python 3.6
+    import socketserver
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+
+
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -63,7 +73,7 @@ class CSRRecord:
     email: str
     status: str = "NEW"
     polls: int = 0
-    cert_id: int | None = None
+    cert_id: "int | None" = None
     pin_hash: str = ""
     kind: str = "user"
 
@@ -106,12 +116,12 @@ class MockCA:
         self.auto_approve = auto_approve
         self.sign_after_polls = sign_after_polls
         self.lock = threading.Lock()
-        self.csrs: dict[str, CSRRecord] = {}
-        self.certificates: dict[int, CertRecord] = {}
-        self.captured: list[Captured] = []
+        self.csrs: "dict[str, CSRRecord]" = {}
+        self.certificates: "dict[int, CertRecord]" = {}
+        self.captured: "list[Captured]" = []
         self.next_csr_id = 1000
         self.next_cert_id = 5000
-        self.reject_next: list[tuple[int, bytes]] = []
+        self.reject_next: "list[tuple[int, bytes]]" = []
         self.delay = 0.0
         self._build_hierarchy()
         self._build_server_certificate()
@@ -157,7 +167,7 @@ class MockCA:
 
     # -- hierarchy ---------------------------------------------------------
     def _build_hierarchy(self) -> None:
-        now = dt.datetime.now(dt.UTC)
+        now = dt.datetime.now(dt.timezone.utc)
         self.root_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         root_name = x509.Name(
             [
@@ -236,7 +246,7 @@ class MockCA:
         )
 
     def _build_server_certificate(self) -> None:
-        now = dt.datetime.now(dt.UTC)
+        now = dt.datetime.now(dt.timezone.utc)
         self.server_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.server_cert = (
             x509.CertificateBuilder()
@@ -280,7 +290,7 @@ class MockCA:
         return tempfile.mkdtemp(prefix="pycert-mockca-")
 
     # -- certificate authority --------------------------------------------
-    def chain_files(self, directory: Path) -> dict[str, str]:
+    def chain_files(self, directory: Path) -> "dict[str, str]":
         """Write the CA chain to *directory* and return name -> SHA-256."""
         from hashlib import sha256
 
@@ -298,7 +308,7 @@ class MockCA:
     def issue(
         self, csr: x509.CertificateSigningRequest, *, kind: str = "user", days: int = 365
     ) -> x509.Certificate:
-        now = dt.datetime.now(dt.UTC)
+        now = dt.datetime.now(dt.timezone.utc)
         builder = (
             x509.CertificateBuilder()
             .subject_name(csr.subject)
@@ -375,8 +385,8 @@ class MockCA:
 
     # -- PPPK verification -------------------------------------------------
     def _find_auth_cert(
-        self, serial: str | None, public_key: str | None, csr_id: str | None
-    ) -> x509.Certificate | None:
+        self, serial: "str | None", public_key: "str | None", csr_id: "str | None"
+    ) -> "x509.Certificate | None":
         if serial:
             try:
                 wanted = int(serial)
@@ -397,7 +407,7 @@ class MockCA:
                     return record.cert
         return None
 
-    def _verify_pppk(self, cert: x509.Certificate, headers: dict, nonce: str) -> tuple[bool, str]:
+    def _verify_pppk(self, cert: x509.Certificate, headers: dict, nonce: str) -> "tuple[bool, str]":
         key = cert.public_key()
         if not isinstance(key, rsa.RSAPublicKey):
             return False, "PPPK requires an RSA certificate"
@@ -425,7 +435,7 @@ class MockCA:
             stamp = int(suffix[1:])
         except ValueError:
             return False, "bad timestamp"
-        now_ms = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
+        now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
         if abs(now_ms - stamp) > 300_000:
             return False, "timestamp outside the window"
         return True, ""
@@ -537,7 +547,7 @@ class MockCA:
                     request = x509.load_pem_x509_csr(pem.encode())
                 except ValueError:
                     return self._send(202, ca._error_xml("could not parse the CSR"))
-                if not request.is_signature_valid:
+                if not csr_signature_valid(request):
                     return self._send(202, ca._error_xml("CSR signature is invalid"))
                 if "@" not in email:
                     return self._send(202, ca._error_xml("Email is not valid"))
@@ -574,7 +584,7 @@ class MockCA:
                     request = x509.load_pem_x509_csr(pem.encode())
                 except ValueError:
                     return self._send(202, ca._error_xml("could not parse the CSR"))
-                if not request.is_signature_valid:
+                if not csr_signature_valid(request):
                     return self._send(202, ca._error_xml("CSR signature is invalid"))
 
                 auth_cert = ca._find_auth_cert(
@@ -638,22 +648,22 @@ class MockCA:
                         parts.append("<certificates><certificate>")
                         parts.append(f"<id>{cert_record.id}</id>")
                         parts.append(f"<status>{cert_record.status}</status>")
-                        parts.append("<owner>" + cert_record.cert.subject.rfc4514_string() + "</owner>")
+                        parts.append("<owner>" + certs.name_to_string(cert_record.cert.subject) + "</owner>")
                         parts.append("<role>RA Operator</role>")
                         parts.append(f"<useremail>{record.email}</useremail>")
                         parts.append(
                             "<startdate>"
-                            + cert_record.cert.not_valid_before_utc.strftime("%d/%m/%Y")
+                            + not_valid_before(cert_record.cert).strftime("%d/%m/%Y")
                             + "</startdate>"
                         )
                         parts.append(
                             "<enddate>"
-                            + cert_record.cert.not_valid_after_utc.strftime("%d/%m/%Y")
+                            + not_valid_after(cert_record.cert).strftime("%d/%m/%Y")
                             + "</enddate>"
                         )
                         parts.append("<lifedays>365</lifedays>")
                         parts.append(
-                            "<renew>" + cert_record.cert.not_valid_after_utc.strftime("%d/%m/%Y") + "</renew>"
+                            "<renew>" + not_valid_after(cert_record.cert).strftime("%d/%m/%Y") + "</renew>"
                         )
                         parts.append("<X509Certificate>" + certificate_pem + "</X509Certificate>")
                         parts.append("</certificate></certificates>")
@@ -661,7 +671,7 @@ class MockCA:
                         parts.append("<CSRs><CSR>")
                         parts.append(f"<id>{record.id}</id>")
                         parts.append(f"<status>{record.status}</status>")
-                        parts.append("<owner>" + record.csr.subject.rfc4514_string() + "</owner>")
+                        parts.append("<owner>" + certs.name_to_string(record.csr.subject) + "</owner>")
                         parts.append("<role>RA Operator</role>")
                         parts.append(f"<useremail>{record.email}</useremail>")
                         parts.append("</CSR></CSRs>")

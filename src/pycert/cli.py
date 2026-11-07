@@ -15,8 +15,6 @@ Exit codes
 4   certificate chain did not validate
 """
 
-from __future__ import annotations
-
 import argparse
 import getpass
 import json
@@ -25,6 +23,7 @@ import time
 from pathlib import Path
 
 from . import __version__, certs
+from .compat import merge_dicts
 from .config import ConfigError, init_config, load_config, write_config
 from .errors import ChainError, PyCertError, TimeoutWaiting
 from .secrets_store import SecretStore, generate_secret
@@ -91,7 +90,7 @@ def _context(args) -> AppContext:
     return AppContext.from_config(config)
 
 
-def _read_secret_option(args, *, what: str, prompt_label: str, required: bool = True) -> str | None:
+def _read_secret_option(args, *, what: str, prompt_label: str, required: bool = True) -> "str | None":
     """Resolve --password / --password-file / --password-stdin / interactive prompt."""
     value = getattr(args, "password", None)
     if value:
@@ -238,8 +237,10 @@ def cmd_config(args) -> int:
         if args.json:
             print(
                 json.dumps(
-                    config.as_dict()
-                    | {"secret_backend": str(SecretStore(config.secrets, config.data_dir, config.profile))},
+                    merge_dicts(
+                        config.as_dict(),
+                        {"secret_backend": str(SecretStore(config.secrets, config.data_dir, config.profile))},
+                    ),
                     indent=2,
                     default=str,
                 )
@@ -287,7 +288,7 @@ def cmd_config(args) -> int:
                 console.warning(warning)
         return 0
     if args.action == "check":
-        problems: list[str] = []
+        problems: "list[str]" = []
         for warning in config.warnings:
             console.warning(warning)
         try:
@@ -478,7 +479,7 @@ def cmd_request(args) -> int:
         csr_hash=args.hash,
         auth_alias=args.auth,
     )
-    pins: list[str] = [spec.pin] if spec.pin else []
+    pins: "list[str]" = [spec.pin] if spec.pin else []
     state = create_request(
         ctx,
         spec,
@@ -515,7 +516,7 @@ def cmd_request(args) -> int:
     return 0
 
 
-def _print_states(console: Console, states: list[RequestState], *, verbose: bool = False) -> None:
+def _print_states(console: Console, states: "list[RequestState]", *, verbose: bool = False) -> None:
     if not states:
         console.info("No certificate requests in the local store.")
         return
@@ -572,7 +573,7 @@ def cmd_status(args) -> int:
         return 0
     if args.alias:
         state = ctx.store.get(args.alias)
-        payload = state.to_dict() | {"days_remaining": state.days_remaining}
+        payload = merge_dicts(state.to_dict(), {"days_remaining": state.days_remaining})
         if args.json:
             print(json.dumps(payload, indent=2, default=str))
             return 0
@@ -631,7 +632,11 @@ def cmd_show(args) -> int:
     ctx = _context(args)
     state = ctx.store.get(args.alias)
     if args.json:
-        print(json.dumps(state.to_dict() | {"days_remaining": state.days_remaining}, indent=2, default=str))
+        print(
+            json.dumps(
+                merge_dicts(state.to_dict(), {"days_remaining": state.days_remaining}), indent=2, default=str
+            )
+        )
         return 0
     _print_state(console, ctx, state)
     return 0
@@ -754,7 +759,7 @@ def cmd_renew(args) -> int:
     state = ctx.store.get(args.alias)
     _confirm(args, f"Renew '{state.alias}' ({state.cn})?", state.alias)
     pin = _read_pin(args)
-    pins: list[str] = [args.pin] if args.pin else []
+    pins: "list[str]" = [args.pin] if args.pin else []
     state = renew(
         ctx,
         args.alias,
@@ -931,6 +936,33 @@ def cmd_secret(args) -> int:
     raise PyCertError(f"unknown secret action: {args.action}")
 
 
+def cmd_doctor(args) -> int:
+    console = Console(json_mode=args.json, quiet=args.quiet)
+    ctx = _context(args)
+    from .diagnostics import FAIL, run_doctor
+
+    results = run_doctor(ctx, offline=args.offline)
+    if args.json:
+        print(json.dumps([result.as_dict() for result in results], indent=2))
+    else:
+        for result in results:
+            console.info("  [%-4s] %-26s %s" % (result.status.upper(), result.name, result.detail))
+    return 1 if any(result.status == FAIL for result in results) else 0
+
+
+def cmd_selftest(args) -> int:
+    console = Console(json_mode=args.json, quiet=args.quiet)
+    from .diagnostics import FAIL, run_selftest
+
+    results = run_selftest()
+    if args.json:
+        print(json.dumps([result.as_dict() for result in results], indent=2))
+    else:
+        for result in results:
+            console.info("  [%-4s] %-24s %s" % (result.status.upper(), result.name, result.detail))
+    return 1 if any(result.status == FAIL for result in results) else 0
+
+
 def cmd_gui(args) -> int:
     try:
         from .gui import run_gui
@@ -1016,7 +1048,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"pyCert {__version__}")
     _add_common(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
+    sub.required = True  # add_subparsers(required=...) is 3.7+
 
     init = sub.add_parser("init", help="create a configuration directory and a saved secret")
     _add_common(init, suppress=True)
@@ -1172,6 +1205,15 @@ def build_parser() -> argparse.ArgumentParser:
     secret.add_argument("--show", action="store_true", help="print the secret (get)")
     secret.set_defaults(func=cmd_secret)
 
+    doctor = sub.add_parser("doctor", help="diagnose the installation and the connection")
+    _add_common(doctor, suppress=True)
+    doctor.add_argument("--offline", action="store_true", help="skip network checks")
+    doctor.set_defaults(func=cmd_doctor)
+
+    selftest = sub.add_parser("selftest", help="run offline cryptographic self-checks")
+    _add_common(selftest, suppress=True)
+    selftest.set_defaults(func=cmd_selftest)
+
     gui = sub.add_parser("gui", help="start the graphical interface")
     _add_common(gui, suppress=True)
     gui.set_defaults(func=cmd_gui)
@@ -1179,7 +1221,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: "list[str] | None" = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     console = Console(

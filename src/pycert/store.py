@@ -17,18 +17,17 @@ the GUI (or two terminals), so a status refresh cannot clobber a concurrent
 export.
 """
 
-from __future__ import annotations
-
 import contextlib
 import json
 import os
-from collections.abc import Iterator
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 from . import certs
 from . import csr as csr_module
+from .compat import dataclass, field
 from .errors import NotFound, PyCertError
 from .util import (
     DIR_MODE,
@@ -101,7 +100,7 @@ class ServerInfo:
         return self.__dict__.copy()
 
     @classmethod
-    def from_dict(cls, data: dict) -> ServerInfo:
+    def from_dict(cls, data: dict) -> "ServerInfo":  # noqa: F821
         return cls(**{k: str(v) for k, v in data.items() if k in cls.__annotations__})
 
 
@@ -114,8 +113,8 @@ class CertInfo:
     not_after: str = ""
     sha256: str = ""
     key: str = ""
-    sans: list[str] = field(default_factory=list)
-    chain_sha256: list[str] = field(default_factory=list)
+    sans: "list[str]" = field(default_factory=list)
+    chain_sha256: "list[str]" = field(default_factory=list)
     verified: bool = False
 
     def to_dict(self) -> dict:
@@ -133,7 +132,7 @@ class CertInfo:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> CertInfo:
+    def from_dict(cls, data: dict) -> "CertInfo":  # noqa: F821
         return cls(
             subject=data.get("subject", ""),
             issuer=data.get("issuer", ""),
@@ -174,8 +173,8 @@ class RequestState:
     cert: CertInfo = field(default_factory=CertInfo)
     p12_path: str = ""
     p12_sha256: str = ""
-    history: list[dict] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
+    history: "list[dict]" = field(default_factory=list)
+    notes: "list[str]" = field(default_factory=list)
     version: int = STATE_VERSION
 
     # -- helpers -----------------------------------------------------------
@@ -189,14 +188,14 @@ class RequestState:
         return self.pending_spki_b64 or self.spki_b64
 
     @property
-    def days_remaining(self) -> int | None:
+    def days_remaining(self) -> "int | None":
         if not self.cert.not_after:
             return None
         try:
             expiry = parse_iso(self.cert.not_after)
         except ValueError:
             return None
-        return (expiry - datetime.now(UTC)).days
+        return (expiry - datetime.now(timezone.utc)).days
 
     def add_history(self, status: str, detail: str = "") -> None:
         self.history.append({"at": iso(), "status": status, "detail": detail})
@@ -243,7 +242,7 @@ class RequestState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> RequestState:
+    def from_dict(cls, data: dict) -> "RequestState":  # noqa: F821
         return cls(
             alias=data["alias"],
             slug=data["slug"],
@@ -278,9 +277,13 @@ class Store:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         self.requests_dir = self.data_dir / "requests"
+        self._lock_guard = threading.Lock()
+        self._rlocks = {}  # path -> threading.RLock (thread-level, reentrant)
+        self._lock_handles = {}  # path -> open file holding the flock
+        self._lock_counts = {}  # path -> nesting depth
 
     # -- enumeration -------------------------------------------------------
-    def list(self) -> list[RequestState]:
+    def list(self) -> "list[RequestState]":
         if not self.requests_dir.is_dir():
             return []
         states = []
@@ -292,7 +295,7 @@ class Store:
         states.sort(key=lambda s: s.created_at)
         return states
 
-    def pending(self) -> list[RequestState]:
+    def pending(self) -> "list[RequestState]":
         return [s for s in self.list() if s.is_pending]
 
     def exists(self, alias: str) -> bool:
@@ -320,7 +323,7 @@ class Store:
             )
         direct = self.requests_dir / slugify(needle) / STATE_FILE
         if direct.is_file():
-            return self._read(direct)
+            return self._read_checked(direct)
         matches = [s for s in states if s.cn.lower() == needle.lower()]
         if len(matches) == 1:
             return matches[0]
@@ -330,7 +333,7 @@ class Store:
             )
         raise NotFound(f"no certificate request matching '{needle}'")
 
-    def get_by_slug(self, slug: str) -> RequestState:
+    def get_by_slug(self, slug: str) -> "RequestState":  # noqa: F821
         path = self.requests_dir / slug / STATE_FILE
         if not path.is_file():
             raise NotFound(f"no certificate request with directory '{slug}'")
@@ -371,6 +374,12 @@ class Store:
         data = json.loads(state_file.read_text(encoding="utf-8"))
         return RequestState.from_dict(data)
 
+    def _read_checked(self, state_file: Path) -> RequestState:
+        try:
+            return self._read(state_file)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise PyCertError(f"the stored state for this request is corrupt ({state_file}): {exc}") from exc
+
     def save(self, state: RequestState) -> None:
         state.version = STATE_VERSION
         ensure_dir(self.path(state), DIR_MODE)
@@ -381,23 +390,58 @@ class Store:
                 mode=SECRET_FILE_MODE,
             )
 
+    def _thread_lock(self, key: str) -> threading.RLock:
+        with self._lock_guard:
+            lock = self._rlocks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._rlocks[key] = lock
+            return lock
+
     @contextlib.contextmanager
     def lock(self, state: RequestState) -> Iterator[None]:
+        """Serialise state updates between threads and processes.
+
+        The lock is reentrant for the same thread (nested ``with`` blocks are
+        safe) and advisory across processes via ``flock``.  Python's ``flock``
+        is per file description, so a second open of the same file in the same
+        process would deadlock; the thread lock plus a nesting counter avoids
+        that.
+        """
         ensure_dir(self.path(state), DIR_MODE)
-        if fcntl is None:  # pragma: no cover - Windows
-            yield
-            return
-        lock_path = self.path(state) / ".lock"
-        with open(lock_path, "a+") as handle:
-            try:
-                os.chmod(lock_path, SECRET_FILE_MODE)
-            except OSError:  # pragma: no cover - read-only directory
-                pass
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        key = str(self.path(state))
+        lock = self._thread_lock(key)
+        lock.acquire()
+        try:
+            depth = self._lock_counts.get(key, 0)
+            if depth == 0 and fcntl is not None:
+                lock_path = self.path(state) / ".lock"
+                handle = open(lock_path, "a+")  # noqa: SIM115 - kept open while the flock is held
+                try:
+                    os.chmod(lock_path, SECRET_FILE_MODE)
+                except OSError:  # pragma: no cover - read-only directory
+                    pass
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                except BaseException:
+                    handle.close()
+                    raise
+                self._lock_handles[key] = handle
+            self._lock_counts[key] = depth + 1
             try:
                 yield
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                depth = self._lock_counts.get(key, 1) - 1
+                self._lock_counts[key] = depth
+                if depth == 0:
+                    handle = self._lock_handles.pop(key, None)
+                    if handle is not None:
+                        try:
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                        finally:
+                            handle.close()
+        finally:
+            lock.release()
 
     # -- key / csr / certificate I/O --------------------------------------
     def save_key(self, state: RequestState, key, password: str) -> Path:
@@ -495,7 +539,7 @@ class Store:
         shutil.rmtree(self.path(state))
 
     # -- audit -------------------------------------------------------------
-    def audit(self) -> list[str]:
+    def audit(self) -> "list[str]":
         """Report files in the data directory that are accessible by others."""
         problems = []
         for root, dirs, files in os.walk(self.data_dir):
@@ -514,5 +558,5 @@ class Store:
         return problems
 
 
-def parse_alias_set(texts: list[str]) -> list[str]:
+def parse_alias_set(texts: "list[str]") -> "list[str]":
     return [t.strip() for t in texts if t.strip()]

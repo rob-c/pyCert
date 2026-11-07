@@ -122,7 +122,7 @@ if a pin is wrong.
 ## Cutting over
 
 1. Install pyCert and run `pycert init` with your e-mail and RA.
-2. `pycert config check` and `pycert ping`.
+2. `pycert config check`, `pycert doctor` and `pycert ping`.
 3. Import the certificates you still need from `~/.ca/cakeystore.pkcs12`.
 4. Move any automation from the GUI to `pycert status --refresh` in cron.
 5. Keep `~/.ca` read-only for a while; delete it once you are confident.

@@ -11,19 +11,15 @@ All cryptographic operations are delegated to the ``cryptography`` library
 * an OpenCA-compatible ordering of Distinguished Name attributes.
 """
 
-from __future__ import annotations
-
 import base64
 import ipaddress
 import warnings
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from typing import Iterable, Sequence, Union
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, rsa
-from cryptography.hazmat.primitives.serialization import pkcs7
 from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509.oid import (
     AuthorityInformationAccessOID,
@@ -31,12 +27,21 @@ from cryptography.x509.oid import (
     NameOID,
 )
 
+from .compat import (
+    dataclass,
+    load_pem_certificates,
+    not_valid_after,
+    not_valid_before,
+    pkcs7_load_der,
+    pkcs7_load_pem,
+    signature_parameters,
+)
 from .errors import CryptoError, UnsupportedAlgorithm
 
-PrivateKey = (
-    rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey | ed448.Ed448PrivateKey
-)
-PublicKey = rsa.RSAPublicKey | ec.EllipticCurvePublicKey | ed25519.Ed25519PublicKey | ed448.Ed448PublicKey
+PrivateKey = Union[
+    rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey
+]
+PublicKey = Union[rsa.RSAPublicKey, ec.EllipticCurvePublicKey, ed25519.Ed25519PublicKey, ed448.Ed448PublicKey]
 
 HASH_ALGORITHMS = {
     "sha256": hashes.SHA256,
@@ -59,7 +64,7 @@ def hash_algorithm(name: str) -> hashes.HashAlgorithm:
 # ---------------------------------------------------------------------------
 
 
-def load_private_key(data: bytes, password: bytes | str | None = None) -> PrivateKey:
+def load_private_key(data: bytes, password: "bytes | str | None" = None) -> PrivateKey:
     if isinstance(password, str):
         password = password.encode()
     try:
@@ -99,7 +104,7 @@ def load_certificate(data: bytes) -> x509.Certificate:
     """Load exactly one certificate from PEM or DER."""
     try:
         if b"-----BEGIN" in data:
-            certs = _quietly(x509.load_pem_x509_certificates, data)
+            certs = _quietly(load_pem_certificates, data)
             if len(certs) != 1:
                 raise CryptoError(f"expected one certificate, found {len(certs)}")
             return certs[0]
@@ -108,7 +113,7 @@ def load_certificate(data: bytes) -> x509.Certificate:
         raise CryptoError(f"could not load certificate: {exc}") from exc
 
 
-def load_certificates(data: bytes) -> list[x509.Certificate]:
+def load_certificates(data: bytes) -> "list[x509.Certificate]":
     """Load every certificate from PEM/DER, a PEM bundle, or a PKCS#7 bundle.
 
     AIA retrieval commonly returns PKCS#7 DER, and the Java client happily
@@ -117,12 +122,12 @@ def load_certificates(data: bytes) -> list[x509.Certificate]:
     """
     if not data or not data.strip():
         raise CryptoError("empty certificate data")
-    candidates: list[list[x509.Certificate]] = []
+    candidates: "list[list[x509.Certificate]]" = []
     if b"-----BEGIN" in data:
         errors = []
         for loader in (
-            lambda d: x509.load_pem_x509_certificates(d),
-            lambda d: pkcs7.load_pem_pkcs7_certificates(d),
+            load_pem_certificates,
+            pkcs7_load_pem,
         ):
             try:
                 candidates.append(list(_quietly(loader, data)))
@@ -135,11 +140,11 @@ def load_certificates(data: bytes) -> list[x509.Certificate]:
             candidates.append([_quietly(x509.load_der_x509_certificate, data)])
         except ValueError:
             try:
-                candidates.append(list(_quietly(pkcs7.load_der_pkcs7_certificates, data)))
+                candidates.append(list(_quietly(pkcs7_load_der, data)))
             except Exception as exc:  # noqa: BLE001
                 raise CryptoError(f"could not parse DER certificate/bundle: {exc}") from exc
-    result: list[x509.Certificate] = []
-    seen: set[str] = set()
+    result: "list[x509.Certificate]" = []
+    seen: "set[str]" = set()
     for batch in candidates:
         for cert in batch:
             fp = fingerprint(cert)
@@ -163,7 +168,7 @@ def cert_der(cert: x509.Certificate) -> bytes:
     return cert.public_bytes(serialization.Encoding.DER)
 
 
-def key_pem(key: PrivateKey, password: str | bytes | None = None) -> str:
+def key_pem(key: PrivateKey, password: "str | bytes | None" = None) -> str:
     if isinstance(password, str):
         password = password.encode()
     encryption = serialization.BestAvailableEncryption(password) if password else serialization.NoEncryption()
@@ -178,17 +183,17 @@ def public_pem(key: PublicKey) -> str:
     ).decode("ascii")
 
 
-def spki_der(key_or_cert: PublicKey | x509.Certificate) -> bytes:
+def spki_der(key_or_cert: "PublicKey | x509.Certificate") -> bytes:
     key = key_or_cert.public_key() if isinstance(key_or_cert, x509.Certificate) else key_or_cert
     return key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
 
 
-def spki_b64(key_or_cert: PublicKey | x509.Certificate) -> str:
+def spki_b64(key_or_cert: "PublicKey | x509.Certificate") -> str:
     """Base64 SPKI, the identifier the CA uses in ``/resources/resource/publickey``."""
     return base64.b64encode(spki_der(key_or_cert)).decode("ascii")
 
 
-def public_keys_equal(a: PublicKey | x509.Certificate, b: PublicKey | x509.Certificate) -> bool:
+def public_keys_equal(a: "PublicKey | x509.Certificate", b: "PublicKey | x509.Certificate") -> bool:
     """Byte-for-byte SubjectPublicKeyInfo comparison (not ``==``, which may raise)."""
     return spki_der(a) == spki_der(b)
 
@@ -227,7 +232,8 @@ def key_description(key: PublicKey) -> str:
 
 
 def signature_description(cert: x509.Certificate) -> str:
-    algorithm = cert.signature_algorithm_oid._name
+    oid = cert.signature_algorithm_oid
+    algorithm = getattr(oid, "_name", oid.dotted_string)
     try:
         digest = cert.signature_hash_algorithm.name.upper()
         return f"{algorithm} ({digest})"
@@ -236,15 +242,17 @@ def signature_description(cert: x509.Certificate) -> str:
 
 
 def name_to_string(name: x509.Name) -> str:
-    return name.rfc4514_string()
+    from .compat import name_to_string as _name_to_string
+
+    return _name_to_string(name)
 
 
-def _san_entries(cert: x509.Certificate) -> list[str]:
+def _san_entries(cert: x509.Certificate) -> "list[str]":
     try:
         san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     except x509.ExtensionNotFound:
         return []
-    entries: list[str] = []
+    entries: "list[str]" = []
     for kind, values in (
         ("DNS", san.get_values_for_type(x509.DNSName)),
         ("email", san.get_values_for_type(x509.RFC822Name)),
@@ -264,7 +272,7 @@ def _ext(cert: x509.Certificate, cls):
         return None
 
 
-def _key_usage_list(usage: x509.KeyUsage | None) -> list[str]:
+def _key_usage_list(usage: "x509.KeyUsage | None") -> "list[str]":
     if usage is None:
         return []
     names = (
@@ -291,7 +299,7 @@ def _key_usage_list(usage: x509.KeyUsage | None) -> list[str]:
     return result
 
 
-def _eku_list(eku: x509.ExtendedKeyUsage | None) -> list[str]:
+def _eku_list(eku: "x509.ExtendedKeyUsage | None") -> "list[str]":
     if eku is None:
         return []
     friendly = {
@@ -305,7 +313,7 @@ def _eku_list(eku: x509.ExtendedKeyUsage | None) -> list[str]:
     return [friendly.get(oid, oid.dotted_string) for oid in eku]
 
 
-def aia_urls(cert: x509.Certificate) -> list[str]:
+def aia_urls(cert: x509.Certificate) -> "list[str]":
     aia = _ext(cert, x509.AuthorityInformationAccess)
     if not aia:
         return []
@@ -317,7 +325,7 @@ def aia_urls(cert: x509.Certificate) -> list[str]:
     ]
 
 
-def _crl_urls(cert: x509.Certificate) -> list[str]:
+def _crl_urls(cert: x509.Certificate) -> "list[str]":
     points = _ext(cert, x509.CRLDistributionPoints)
     if not points:
         return []
@@ -343,11 +351,11 @@ class CertDescription:
     fingerprint_sha256: str
     is_ca: bool
     is_self_signed: bool
-    subject_alt_names: list[str]
-    key_usage: list[str]
-    extended_key_usage: list[str]
-    aia_urls: list[str]
-    crl_urls: list[str]
+    subject_alt_names: "list[str]"
+    key_usage: "list[str]"
+    extended_key_usage: "list[str]"
+    aia_urls: "list[str]"
+    crl_urls: "list[str]"
     basic_constraints: str
     subject_key_id: str
     authority_key_id: str
@@ -357,8 +365,8 @@ class CertDescription:
             "subject": self.subject,
             "issuer": self.issuer,
             "serial": self.serial,
-            "not_before": self.not_before.astimezone(UTC).isoformat(),
-            "not_after": self.not_after.astimezone(UTC).isoformat(),
+            "not_before": self.not_before.astimezone(timezone.utc).isoformat(),
+            "not_after": self.not_after.astimezone(timezone.utc).isoformat(),
             "days_remaining": self.days_remaining,
             "key": self.key,
             "signature": self.signature,
@@ -376,16 +384,16 @@ class CertDescription:
         }
 
 
-def describe_certificate(cert: x509.Certificate, now: datetime | None = None) -> CertDescription:
+def describe_certificate(cert: x509.Certificate, now: "datetime | None" = None) -> CertDescription:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", CryptographyDeprecationWarning)
         return _describe_certificate(cert, now)
 
 
-def _describe_certificate(cert: x509.Certificate, now: datetime | None = None) -> CertDescription:
-    now = now or datetime.now(UTC)
-    not_before = cert.not_valid_before_utc
-    not_after = cert.not_valid_after_utc
+def _describe_certificate(cert: x509.Certificate, now: "datetime | None" = None) -> CertDescription:
+    now = now or datetime.now(timezone.utc)
+    not_before = not_valid_before(cert)
+    not_after = not_valid_after(cert)
     basic = _ext(cert, x509.BasicConstraints)
     ski = _ext(cert, x509.SubjectKeyIdentifier)
     aki = _ext(cert, x509.AuthorityKeyIdentifier)
@@ -439,7 +447,7 @@ def verify_certificate_signature(cert: x509.Certificate, issuer: x509.Certificat
         )
     public_key = issuer.public_key()
     try:
-        parameters = cert.signature_algorithm_parameters
+        parameters = signature_parameters(cert)
     except (UnsupportedAlgorithm, ValueError) as exc:  # pragma: no cover - exotic algorithms
         raise CryptoError(f"unsupported signature algorithm: {signature_description(cert)}") from exc
     try:
@@ -469,22 +477,22 @@ def is_self_signed(cert: x509.Certificate) -> bool:
         return False
 
 
-def certificate_valid_at(cert: x509.Certificate, when: datetime | None = None) -> bool:
-    when = when or datetime.now(UTC)
-    return cert.not_valid_before_utc <= when <= cert.not_valid_after_utc
+def certificate_valid_at(cert: x509.Certificate, when: "datetime | None" = None) -> bool:
+    when = when or datetime.now(timezone.utc)
+    return not_valid_before(cert) <= when <= not_valid_after(cert)
 
 
 def certificate_matches_key(cert: x509.Certificate, key: PrivateKey) -> bool:
     return public_keys_equal(cert, key.public_key())
 
 
-def basic_constraints_ca(cert: x509.Certificate) -> bool | None:
+def basic_constraints_ca(cert: x509.Certificate) -> "bool | None":
     """True/False when BasicConstraints is present, None when absent."""
     basic = _ext(cert, x509.BasicConstraints)
     return None if basic is None else basic.ca
 
 
-def has_name_constraints_violation(cert: x509.Certificate, issuer: x509.Certificate) -> list[str]:
+def has_name_constraints_violation(cert: x509.Certificate, issuer: x509.Certificate) -> "list[str]":
     """Very small NameConstraints check for DNS SANs (defence in depth).
 
     pyCert only ever consumes certificates from the configured CA, so this is a
@@ -531,9 +539,9 @@ def canonical_openca_name(name: x509.Name) -> x509.Name:
     RDNs are preserved (they are rare, but silently dropping attributes from an
     existing certificate's subject would be a bug).
     """
-    attributes: list[x509.RelativeDistinguishedName] = list(name.rdns)
-    ordered: list[x509.RelativeDistinguishedName] = []
-    used: set[int] = set()
+    attributes: "list[x509.RelativeDistinguishedName]" = list(name.rdns)
+    ordered: "list[x509.RelativeDistinguishedName]" = []
+    used: "set[int]" = set()
     for oid in OPENCA_ATTRIBUTE_ORDER:
         for index, rdn in enumerate(attributes):
             if index in used:
@@ -554,8 +562,8 @@ def build_subject(
     organizational_unit: str,
     locality: str,
     country: str,
-    state: str | None = None,
-    email: str | None = None,
+    state: "str | None" = None,
+    email: "str | None" = None,
     include_email_in_subject: bool = False,
 ) -> x509.Name:
     """Build the CSR subject in the same order CertWizard used.
@@ -579,7 +587,7 @@ def build_subject(
     return x509.Name(attributes)
 
 
-def name_attribute(name: x509.Name, oid: x509.ObjectIdentifier) -> str | None:
+def name_attribute(name: x509.Name, oid: x509.ObjectIdentifier) -> "str | None":
     for attribute in name:
         if attribute.oid == oid:
             return attribute.value
@@ -593,11 +601,11 @@ def common_name(name: x509.Name) -> str:
     return value
 
 
-def subject_alt_names(cert: x509.Certificate) -> list[str]:
+def subject_alt_names(cert: x509.Certificate) -> "list[str]":
     return _san_entries(cert)
 
 
-def parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+def parse_ip(value: str) -> "ipaddress.IPv4Address | ipaddress.IPv6Address":
     return ipaddress.ip_address(value)
 
 

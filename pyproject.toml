@@ -1,49 +1,13 @@
+# Metadata lives in setup.cfg so that Python 3.6 can build from source with
+# setuptools 59.  PEP 621 ([project]) requires setuptools >= 61, which needs
+# Python >= 3.7; a marker below selects a compatible build backend per version.
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "pycert"
-version = "1.0.0"
-description = "Request, wait for, download and export UK e-Science CA certificates (a CertWizard replacement)"
-readme = "README.md"
-requires-python = ">=3.11"
-license = "GPL-2.0-or-later"
-license-files = ["LICENSE"]
-authors = [{ name = "pyCert contributors" }]
-keywords = ["x509", "pkcs12", "pki", "certificate", "escience", "certwizard"]
-classifiers = [
-  "Development Status :: 5 - Production/Stable",
-  "Environment :: Console",
-  "Environment :: X11 Applications",
-  "Intended Audience :: System Administrators",
-  "Operating System :: POSIX",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
-  "Topic :: Security :: Cryptography",
-  "Topic :: System :: Systems Administration",
+requires = [
+  "setuptools>=59.6; python_version < '3.8'",
+  "setuptools>=68; python_version >= '3.8'",
+  "wheel",
 ]
-# cryptography is the only mandatory dependency: it is the audited, OpenSSL-backed
-# implementation of every primitive pyCert uses.  The GUI uses tkinter from the
-# standard library, so no extra dependency is needed.
-dependencies = ["cryptography>=44"]
-
-[project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
-
-[project.scripts]
-pycert = "pycert.cli:main"
-pycert-gui = "pycert.gui:main"
-
-[project.urls]
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-pycert = ["data/ca/*.pem"]
+build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -52,7 +16,7 @@ filterwarnings = ["error::DeprecationWarning:pycert.*"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+target-version = "py311"  # ruff has no py36 target; see the ignore list for deliberate 3.6 style
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RET", "C4", "PT"]
@@ -63,4 +27,16 @@ ignore = [
   "PT011",  # pytest.raises(...) without match= is fine in tests
   "PT006",  # parametrize with a comma-separated string is readable
   "PT018",  # compound assertions are fine in tests
+  # pyCert targets Python 3.6, so typing.List/Optional and timezone.utc are correct.
+  "UP006",
+  "UP007",
+  "UP017",
+  "UP031",  # percent formatting is intentional in 3.6-compatible code
+  "UP035",
+  "UP037",  # quoted forward references are required without __future__ annotations
+  "UP041",  # socket.timeout is the documented 3.6 name
+  "UP045",
+  "B009",   # deliberate getattr probing of newer cryptography attributes
+  "B904",   # the exception text is included in the new message
+  "B905",   # zip(strict=...) is 3.10+
 ]

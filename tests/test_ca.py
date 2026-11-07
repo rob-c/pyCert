@@ -3,7 +3,6 @@ import datetime as dt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from pycert import ca as ca_module
 from pycert import certs
 from pycert import csr as csr_module
 from pycert.ca import CAClient, pppk_response
@@ -253,11 +252,12 @@ def test_doctype_after_a_long_comment_is_rejected(ctx, ca):
         ctx.client().lookup_public_key("x")
 
 
-def test_oversized_response_is_refused(ctx, ca, monkeypatch):
-    monkeypatch.setattr(ca_module, "MAX_RESPONSE_BYTES", 100)
+def test_oversized_response_is_refused(ctx, ca):
     ca.reject_next = [(200, b"x" * 500)]
-    with pytest.raises(ProtocolError, match="exceeds"):
-        ctx.client().lookup_public_key("x")
+    client = ctx.client()
+    client.transport.config.max_body_bytes = 100
+    with pytest.raises(NetworkError, match="exceeds"):
+        client.lookup_public_key("x")
 
 
 def test_http_500_maps_to_ca_error(ctx, ca):

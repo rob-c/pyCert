@@ -21,19 +21,17 @@ that every certificate is inside its validity window, and that no DNS name
 violates the issuer's NameConstraints.
 """
 
-from __future__ import annotations
-
 import ssl
 import urllib.error
 import urllib.request
 import warnings
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from typing import Callable, Iterable, Sequence
 
 from cryptography import x509
 
 from . import certs
+from .compat import dataclass, field, not_valid_after, not_valid_before
 from .errors import ChainError
 
 MAX_DEPTH = 10
@@ -42,24 +40,24 @@ MAX_AIA_BYTES = 1024 * 1024
 
 @dataclass
 class ChainResult:
-    chain: list[x509.Certificate]
+    chain: "list[x509.Certificate]"
     complete: bool
     trusted: bool
-    problems: list[str] = field(default_factory=list)
-    fetched: list[str] = field(default_factory=list)
+    problems: "list[str]" = field(default_factory=list)
+    fetched: "list[str]" = field(default_factory=list)
 
     @property
     def leaf(self) -> x509.Certificate:
         return self.chain[0]
 
     @property
-    def issuers(self) -> list[x509.Certificate]:
+    def issuers(self) -> "list[x509.Certificate]":
         return self.chain[1:]
 
     def pem(self) -> str:
         return "".join(certs.cert_pem(c) for c in self.chain)
 
-    def require_valid(self) -> ChainResult:
+    def require_valid(self) -> "ChainResult":  # noqa: F821
         if not self.trusted:
             detail = "; ".join(self.problems) or "the chain does not reach a configured trust anchor"
             raise ChainError(f"certificate chain did not validate: {detail}")
@@ -84,18 +82,18 @@ class ChainBuilder:
         *,
         anchors: Sequence[x509.Certificate] = (),
         extra: Sequence[x509.Certificate] = (),
-        fetcher: AiaFetcher | None = None,
+        fetcher: "AiaFetcher | None" = None,
         allow_sha1: bool = False,
-        now: datetime | None = None,
+        now: "datetime | None" = None,
         max_depth: int = MAX_DEPTH,
     ):
         self.anchors = list(anchors)
         self.pool = _dedupe([*extra, *anchors])
         self.fetcher = fetcher
         self.allow_sha1 = allow_sha1
-        self.now = now or datetime.now(UTC)
+        self.now = now or datetime.now(timezone.utc)
         self.max_depth = max_depth
-        self._fetched_urls: list[str] = []
+        self._fetched_urls: "list[str]" = []
         self._anchor_fingerprints = {certs.fingerprint(c) for c in anchors}
 
     def build(self, leaf: x509.Certificate, extra: Iterable[x509.Certificate] = ()) -> ChainResult:
@@ -104,7 +102,7 @@ class ChainBuilder:
         chain = [leaf]
         seen = {certs.fingerprint(leaf)}
         current = leaf
-        notes: list[str] = []
+        notes: "list[str]" = []
         anchor_index = 0 if self._is_trusted(leaf) else None
 
         while True:
@@ -140,7 +138,7 @@ class ChainBuilder:
         complete = certs.is_self_signed(chain[-1])
         return ChainResult(chain, complete, trusted, problems, list(self._fetched_urls))
 
-    def _path_problems(self, chain: list[x509.Certificate], anchor_index: int | None) -> list[str]:
+    def _path_problems(self, chain: "list[x509.Certificate]", anchor_index: "int | None") -> "list[str]":
         """Validate the part of the chain that actually leads to the anchor.
 
         The trust anchor itself is trusted out of band: per RFC 5280 its expiry
@@ -148,7 +146,7 @@ class ChainBuilder:
         (the leaf and every intermediate) must be inside its validity window, use
         an acceptable signature hash, and respect name constraints.
         """
-        problems: list[str] = []
+        problems: "list[str]" = []
         limit = len(chain) if anchor_index is None else anchor_index + 1
         for index in range(limit):
             cert = chain[index]
@@ -160,7 +158,7 @@ class ChainBuilder:
             if not out_of_band and not certs.certificate_valid_at(cert, self.now):
                 problems.append(
                     f"certificate is not valid at the current time: '{_name(cert)}' "
-                    f"({cert.not_valid_before_utc.isoformat()} .. {cert.not_valid_after_utc.isoformat()})"
+                    f"({not_valid_before(cert).isoformat()} .. {not_valid_after(cert).isoformat()})"
                 )
             if not out_of_band and not self.allow_sha1 and self._weak(cert):
                 try:
@@ -186,7 +184,7 @@ class ChainBuilder:
         except (ValueError, AttributeError):  # pragma: no cover
             return False
 
-    def _select_issuer(self, child: x509.Certificate, seen: set[str]) -> x509.Certificate | None:
+    def _select_issuer(self, child: x509.Certificate, seen: "set[str]") -> "x509.Certificate | None":
         candidates = []
         for candidate in self.pool:
             fp = certs.fingerprint(candidate)
@@ -225,7 +223,7 @@ class ChainBuilder:
             return True
         return aki.key_identifier == ski.digest
 
-    def _fetch_for(self, cert: x509.Certificate) -> list[x509.Certificate]:
+    def _fetch_for(self, cert: x509.Certificate) -> "list[x509.Certificate]":
         if self.fetcher is None:
             return []
         try:
@@ -249,8 +247,8 @@ def _name(cert: x509.Certificate) -> str:
     return cert.subject.rfc4514_string()
 
 
-def _dedupe(certificates: Iterable[x509.Certificate]) -> list[x509.Certificate]:
-    seen: set[str] = set()
+def _dedupe(certificates: Iterable[x509.Certificate]) -> "list[x509.Certificate]":
+    seen: "set[str]" = set()
     result = []
     for cert in certificates:
         fp = certs.fingerprint(cert)
@@ -265,24 +263,24 @@ def build_chain(
     *,
     anchors: Sequence[x509.Certificate] = (),
     extra: Sequence[x509.Certificate] = (),
-    fetcher: AiaFetcher | None = None,
+    fetcher: "AiaFetcher | None" = None,
     allow_sha1: bool = False,
-    now: datetime | None = None,
+    now: "datetime | None" = None,
 ) -> ChainResult:
     return ChainBuilder(anchors=anchors, extra=extra, fetcher=fetcher, allow_sha1=allow_sha1, now=now).build(
         leaf
     )
 
 
-_system_anchors_cache: list[x509.Certificate] | None = None
+_system_anchors_cache: "list[x509.Certificate] | None" = None
 
 
-def system_anchors() -> list[x509.Certificate]:
+def system_anchors() -> "list[x509.Certificate]":
     """Certificates from the operating system trust store (best effort)."""
     global _system_anchors_cache
     if _system_anchors_cache is not None:
         return _system_anchors_cache
-    result: list[x509.Certificate] = []
+    result: "list[x509.Certificate]" = []
     try:
         context = ssl.create_default_context()
         with warnings.catch_warnings():
@@ -303,7 +301,7 @@ def system_anchors() -> list[x509.Certificate]:
     return result
 
 
-def aia_fetch(certificate: x509.Certificate, *, timeout: float = 10.0) -> list[x509.Certificate]:
+def aia_fetch(certificate: x509.Certificate, *, timeout: float = 10.0) -> "list[x509.Certificate]":
     """Fetch ``caIssuers`` certificates for *certificate*.
 
     HTTP(S) only, 1 MiB limit, one level of content.  Nothing is trusted: the
@@ -320,8 +318,8 @@ def aia_fetch(certificate: x509.Certificate, *, timeout: float = 10.0) -> list[x
         if description.access_method == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS
         and isinstance(description.access_location, x509.UniformResourceIdentifier)
     ]
-    results: list[x509.Certificate] = []
-    failures: list[str] = []
+    results: "list[x509.Certificate]" = []
+    failures: "list[str]" = []
     for url in urls:
         if not url.lower().startswith(("http://", "https://")):
             failures.append(f"{url}: unsupported scheme")

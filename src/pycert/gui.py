@@ -18,8 +18,6 @@ Security notes:
 * files are opened read-only and paths are shown in full.
 """
 
-from __future__ import annotations
-
 import os
 import queue
 import shlex
@@ -28,10 +26,10 @@ import sys
 import threading
 import tkinter as tk
 import traceback
-from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Callable
 
 from . import __version__, certs
 from .config import ChainEntry, Config, load_config, write_config
@@ -69,8 +67,8 @@ class Tooltip:
         self.widget = widget
         self.text = text
         self.delay = delay
-        self._after: str | None = None
-        self._window: tk.Toplevel | None = None
+        self._after: "str | None" = None
+        self._window: "tk.Toplevel | None" = None
         widget.bind("<Enter>", self._schedule, add="+")
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
@@ -99,7 +97,7 @@ class Tooltip:
             self._window = None
 
 
-def _readonly_text(parent: tk.Widget, height: int = 12) -> tuple[tk.Text, ttk.Scrollbar, tk.Frame]:
+def _readonly_text(parent: tk.Widget, height: int = 12) -> "tuple[tk.Text, ttk.Scrollbar, tk.Frame]":
     frame = ttk.Frame(parent)
     text = tk.Text(
         frame,
@@ -200,7 +198,7 @@ class WaitDialog(tk.Toplevel):
 
     def __init__(
         self,
-        parent: PyCertApp,
+        parent: "PyCertApp",  # noqa: F821
         title: str,
         work: Callable[[Callable[[str], None]], object],
         on_done: Callable[[object], None],
@@ -285,16 +283,16 @@ class WaitDialog(tk.Toplevel):
 
 
 class NewRequestDialog(tk.Toplevel):
-    def __init__(self, app: PyCertApp):
+    def __init__(self, app: "PyCertApp"):  # noqa: F821
         super().__init__(app)
         self.app = app
         self.ctx = app.ctx
         self.cfg = app.cfg
-        self.result_holder: list[RequestState] = []
+        self.result_holder: "list[RequestState]" = []
         self.title("New certificate request")
         self.transient(app)
         self.minsize(720, 620)
-        self._ras: list[str] = [self.cfg.identity.ra] if self.cfg.identity.ra else []
+        self._ras: "list[str]" = [self.cfg.identity.ra] if self.cfg.identity.ra else []
         self._build()
         self.grab_set()
         self.cn_var.set("")
@@ -542,7 +540,7 @@ class NewRequestDialog(tk.Toplevel):
         wait = self.wait_var.get()
 
         def work(progress):
-            pins: list[str] = []
+            pins: "list[str]" = []
             state = create_request(
                 self.ctx,
                 spec,
@@ -575,7 +573,7 @@ class NewRequestDialog(tk.Toplevel):
 
 
 class RevokeDialog(tk.Toplevel):
-    def __init__(self, app: PyCertApp, state: RequestState):
+    def __init__(self, app: "PyCertApp", state: RequestState):  # noqa: F821
         super().__init__(app)
         self.app = app
         self.state = state
@@ -651,7 +649,7 @@ class RevokeDialog(tk.Toplevel):
 
 
 class SettingsDialog(tk.Toplevel):
-    def __init__(self, app: PyCertApp):
+    def __init__(self, app: "PyCertApp"):  # noqa: F821
         super().__init__(app)
         self.app = app
         self.cfg = app.cfg
@@ -1011,7 +1009,7 @@ class SettingsDialog(tk.Toplevel):
 
 
 class PyCertApp(tk.Tk):
-    def __init__(self, config_path: str | None = None):
+    def __init__(self, config_path: "str | None" = None):
         super().__init__()
         self.config_path = config_path
         self.cfg: Config = load_config(config_path)
@@ -1019,7 +1017,7 @@ class PyCertApp(tk.Tk):
         self._queue: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
         self._busy_count = 0
-        self._selected_alias: str | None = None
+        self._selected_alias: "str | None" = None
         self._sort_column = "alias"
         self._sort_reverse = False
 
@@ -1091,6 +1089,7 @@ class PyCertApp(tk.Tk):
         tools_menu.add_command(label="Ping the CA", command=self.ping_server)
         tools_menu.add_command(label="Show CA info", command=self.show_ca_info)
         tools_menu.add_command(label="Secret store...", command=self.show_secret_info)
+        tools_menu.add_command(label="Run diagnostics (doctor)", command=self.run_diagnostics)
         tools_menu.add_separator()
         tools_menu.add_command(label="Settings...", command=lambda: SettingsDialog(self))
         menu.add_cascade(label="Tools", menu=tools_menu)
@@ -1131,7 +1130,7 @@ class PyCertApp(tk.Tk):
     def _build_toolbar(self) -> None:
         bar = ttk.Frame(self, padding=(16, 4))
         bar.pack(fill="x")
-        self.buttons: dict[str, ttk.Button] = {}
+        self.buttons: "dict[str, ttk.Button]" = {}
         definitions = [
             ("new", "New request", self.new_request, "Create a key and submit a CSR"),
             ("refresh", "Refresh", self.refresh_list, "Re-read the local store"),
@@ -1209,7 +1208,7 @@ class PyCertApp(tk.Tk):
 
         overview = ttk.Frame(self.notebook, padding=12)
         overview.columnconfigure(1, weight=1)
-        self.overview_labels: dict[str, ttk.Label] = {}
+        self.overview_labels: "dict[str, ttk.Label]" = {}
         rows = [
             ("status", "Status"),
             ("type", "Type"),
@@ -1549,7 +1548,7 @@ class PyCertApp(tk.Tk):
         _set_text(self.history_text, "\n".join(lines) or "No history yet.")
 
     # -- actions -----------------------------------------------------------
-    def _selected_state(self, *, require_cert: bool = False) -> RequestState | None:
+    def _selected_state(self, *, require_cert: bool = False) -> "RequestState | None":
         if not self._selected_alias:
             messagebox.showinfo("pyCert", "Select a certificate first.", parent=self)
             return None
@@ -1722,7 +1721,7 @@ class PyCertApp(tk.Tk):
             parent=self,
         ):
             return
-        pins: list[str] = []
+        pins: "list[str]" = []
 
         def work(progress):
             return renew(self.ctx, state.alias, progress=progress, on_pin=pins.append, wait=False)
@@ -1795,12 +1794,12 @@ class PyCertApp(tk.Tk):
 
         def work(_progress):
             client = self.ctx.client()
-            started = datetime.now(UTC)
+            started = datetime.now(timezone.utc)
             ok = client.ping()
             return (
                 ok,
                 client.last_tls,
-                (datetime.now(UTC) - started).total_seconds(),
+                (datetime.now(timezone.utc) - started).total_seconds(),
                 client.last_error,
             )
 
@@ -1853,6 +1852,26 @@ class PyCertApp(tk.Tk):
                         f"    expires {description.not_after.date()}  {description.fingerprint_sha256}"
                     )
             messagebox.showinfo("CA information", "\n".join(lines), parent=self)
+
+        self.run_background(work, done)
+
+    def run_diagnostics(self) -> None:
+        def work(_progress):
+            from .diagnostics import run_doctor
+
+            return run_doctor(self.ctx)
+
+        def done(result):
+            if isinstance(result, Exception):
+                self.show_error("Diagnostics failed", result)
+                return
+            lines = [
+                "[%s] %s%s" % (item.status.upper(), item.name, (": " + item.detail) if item.detail else "")
+                for item in result
+            ]
+            failures = [item for item in result if item.status == "fail"]
+            title = "Diagnostics: %d problem(s)" % len(failures) if failures else "Diagnostics: all clear"
+            (messagebox.showerror if failures else messagebox.showinfo)(title, "\n".join(lines), parent=self)
 
         self.run_background(work, done)
 
@@ -1957,7 +1976,7 @@ def _open_doc(relative: str) -> None:
         )
 
 
-def run_gui(config_path: str | None = None) -> int:
+def run_gui(config_path: "str | None" = None) -> int:
     try:
         app = PyCertApp(config_path)
     except PyCertError as exc:
@@ -1971,7 +1990,7 @@ def run_gui(config_path: str | None = None) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: "list[str] | None" = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(prog="pycert-gui", description="pyCert graphical interface")

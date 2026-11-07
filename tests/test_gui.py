@@ -106,3 +106,6 @@ def test_gui_dialogs_build(config, issued):
         revoke.destroy()
     finally:
         app.destroy()
+
+
+pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")

@@ -37,13 +37,25 @@ without colliding (`service:profile`).
 | `base_url` | `https://cwiz-live.ca.ngs.ac.uk:443` | CA server, scheme + host + optional port |
 | `version_string` | `CertWizard 2.2.1` | value sent in the `<Version>` XML element; the server validates it |
 | `user_agent` | `pyCert/1.0` | HTTP `User-Agent` |
-| `timeout` | `30` | socket timeout in seconds |
-| `retries` | `2` | GET retries on connection errors (POSTs are never retried) |
+| `timeout` | `30` | socket read timeout in seconds |
+| `connect_timeout` | `10` | TCP connect timeout in seconds |
+| `deadline` | `90` | total time for one request attempt (headers + body) |
+| `dns_timeout` | `10` | name-resolution timeout in seconds |
+| `retries` | `2` | retries for idempotent requests only (never POST submissions) |
+| `max_redirects` | `2` | same-host redirects allowed for GET/HEAD |
+| `max_body_bytes` | `8388608` | maximum response body size |
+| `max_header_bytes` | `131072` | maximum response header size |
+| `backoff_base` | `0.4` | initial retry backoff in seconds |
+| `backoff_cap` | `8.0` | maximum retry/Retry-After delay in seconds |
 | `tls_verify` | `true` | verify the server certificate |
 | `tls_trust` | `"chain"` | `chain`, `system` or `both` |
 | `tls_pin_sha256` | `[]` | optional SHA-256 leaf fingerprints (colon or plain hex) |
 | `allow_plaintext` | `false` | permit `http://` (local test CA only) |
 | `allow_sha1` | `false` | accept SHA-1-signed certificates in a chain |
+
+These bounds are what make pyCert safe against malformed or malicious network
+peers.  Lowering them is fine on a fast network; raising `retries` above 10 or
+`deadline` above an hour is rejected by validation.
 
 `tls_trust = "chain"` uses the `[[chain.certificates]]` anchors for TLS,
 `"system"` uses the OS store, `"both"` accepts either. If verification is on and
