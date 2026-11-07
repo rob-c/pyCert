@@ -7,12 +7,11 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
-
-from mock_ca import MockCA  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pycert.config import ChainEntry, init_config, load_config, write_config  # noqa: E402
 from pycert.workflow import AppContext  # noqa: E402
+from sandbox_ca.mock_ca import MockCA  # noqa: E402
 
 
 @pytest.fixture(scope="session")

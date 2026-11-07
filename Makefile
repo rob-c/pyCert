@@ -28,18 +28,18 @@ test:
 	$(BIN)/pytest
 
 lint:
-	$(BIN)/ruff check src tests
+	$(BIN)/ruff check src tests sandbox_ca
 
 check-py36:
 	$(BIN)/python tools/check_py36.py .
-	$(BIN)/vermin -t=3.6- --no-tips --violations src/pycert
+	$(BIN)/vermin -t=3.6- --no-tips --violations src/pycert sandbox_ca
 
 selftest:
 	$(BIN)/pycert selftest
 
 format:
-	$(BIN)/ruff format src tests
-	$(BIN)/ruff check --fix src tests
+	$(BIN)/ruff format src tests sandbox_ca
+	$(BIN)/ruff check --fix src tests sandbox_ca
 
 check: lint check-py36 test
 

@@ -3,7 +3,9 @@
 There is no public specification for the UK e-Science CA’s client API.
 This document records the wire protocol pyCert implements, derived from
 CertWizard’s source and verified against the live server where possible. If the
-CA changes, this is the file to update.
+CA changes, this is the file to update. For the fuller **listener** contract
+(including the Java client's quirks, TLS truststore pinning and a runnable
+sandbox), see [CA_LISTENER.md](CA_LISTENER.md).
 
 ## Transport
 
@@ -32,8 +34,8 @@ revocation are not.  See the README for the configuration knobs and
 | `GET` | `/pingservice` | liveness; 200 with a short body |
 | `GET` | `/CA` | CA certificates, RA list, preferred RA, policy |
 | `GET` | `/CA/motd/text` | message of the day (returns XML, see below) |
-| `POST` | `/CSR` | new user certificate request |
-| `POST` | `/CSRs` | host request or renewal (PPPK authenticated) |
+| `POST` | `/CSR` | new user certificate request; **current Java renewals** also use this path with PPPK |
+| `POST` | `/CSRs` | host request (PPPK authenticated); legacy renewal path |
 | `POST` | `/resources/resource/publickey/pk` | status lookup by public key |
 | `GET` | `/certificate/<id>` | issued certificate |
 | `POST` | `/revoke` | revocation (PPPK authenticated) |
@@ -103,7 +105,11 @@ pyCert (`csr.pin_hash = "sha1"`).
 The server enforces that the `<Email>` element matches the CSR’s e-mail SAN for
 user requests; a mismatch comes back as a 202 with a message.
 
-### `POST /CSRs` (host and renewal)
+### `POST /CSRs` (host; legacy renewal)
+
+pyCert itself posts renewals to `/CSRs`; current Java CertWizard posts them to
+`/CSR` with the `PPPK` header. A listener should accept both. The request
+shapes below are the same on either path.
 
 Two request shapes, both requiring PPPK client authentication:
 
@@ -248,8 +254,10 @@ DRAFT ──submit──> SUBMITTED ──RA approves──> APPROVED ──CA s
 
 ## Testing the protocol
 
-`tests/mock_ca.py` implements all of the above over real TLS, including PPPK
-challenges, status transitions, revocation and AIA fetching. `tests/test_ca.py`
-and `tests/test_workflow.py` assert the exact shapes and the PPPK arithmetic, so
-a protocol change is visible as a test failure rather than a mysterious error in
-production.
+`sandbox_ca/mock_ca.py` (re-exported as `tests/mock_ca.py`) implements all of
+the above over real TLS, including PPPK challenges, status transitions,
+revocation and AIA fetching. `tests/test_ca.py` and `tests/test_workflow.py`
+assert the exact shapes and the PPPK arithmetic, so a protocol change is visible
+as a test failure rather than a mysterious error in production. The standalone
+`sandbox_ca` server and the Java kit are described in
+[CA_LISTENER.md](CA_LISTENER.md).

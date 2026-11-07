@@ -49,7 +49,7 @@ class RawServer:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(16)
+        self._sock.listen(128)
         self._sock.settimeout(0.1)
         self.port = self._sock.getsockname()[1]
         self._thread = threading.Thread(target=self._serve, name="raw-server")

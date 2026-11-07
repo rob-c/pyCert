@@ -44,7 +44,7 @@ workflow) are about 4,000 lines and can be reviewed end to end in an afternoon.
 
 | | CertWizard (Java) | pyCert |
 |---|---|---|
-| Runtime | JDK 11+, bundled JRE in installers | Python 3.6+ (stdlib + `cryptography`) |
+| Runtime | JDK 25+ (current `develop`), bundled JRE in installers | Python 3.6+ (stdlib + `cryptography`) |
 | Startup | JVM + Swing + Restlet initialisation | ~90 ms CLI, ~440 ms to a painted GUI window (measured) |
 | Build | Maven, NetBeans for the GUI forms | `pip install .` |
 | TLS trust | JKS trust store, password `passwd` in the config | PEM chain in the config, pinned by SHA-256; optional leaf pin |
@@ -55,8 +55,8 @@ workflow) are about 4,000 lines and can be reviewed end to end in an afternoon.
 | Waiting for signing | user clicks refresh repeatedly | `--wait` / `pycert wait`, exponential jitter, cancellable, exit code 3 on timeout |
 | PIN | SHA-1 hash, entered in a Swing dialog | SHA-1 hash (server requirement), generated once and shown in a modal/GUI |
 | Automation | GUI only | CLI + `--json` + exit codes + cron/launchd examples |
-| Tests | a couple of XML parser tests | 3,150+ tests, including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
-| Documentation | `readme.txt` | README, configuration reference, protocol notes, security model, migration guide |
+| Tests | a couple of XML parser tests | 3,170+ tests (3,174 at the last check), including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
+| Documentation | `readme.txt` | README, configuration reference, protocol notes, CA-listener contract + Java sandbox, security model, migration guide |
 
 Everything above is verifiable from the sources: the Java template default is in
 `src/main/resources/template.configure.properties`, the trust store password in
@@ -96,7 +96,7 @@ picks cryptography 3.3.x automatically.
 The package is validated on Python 3.6.15 with cryptography 3.3.2 in a
 container: install, `pycert selftest`, `init`, `config check`, live `ping`/`ras`
 and `doctor`, plus a full mock-CA request → download → PKCS#12 → renew → revoke
-flow.  The 3,150+ test suite itself runs on a modern Python.
+flow.  The 3,174 test suite itself runs on a modern Python.
 
 ---
 
@@ -355,7 +355,9 @@ Read [SECURITY.md](SECURITY.md) for the threat model. In short:
 ## Compatibility notes
 
 The CA protocol is undocumented; pyCert implements what CertWizard does (see
-[docs/PROTOCOL.md](docs/PROTOCOL.md)). Points to be aware of:
+[docs/PROTOCOL.md](docs/PROTOCOL.md)). The listener contract and a runnable
+sandbox for the real Java client are documented in
+[docs/CA_LISTENER.md](docs/CA_LISTENER.md). Points to be aware of:
 
 - **PIN hash:** the current server compares the RA’s hash with a SHA-1 hash, so
   `pycert` hashes the PIN with SHA-1 (upper-case hex), like the Java client.
@@ -379,13 +381,14 @@ The CA protocol is undocumented; pyCert implements what CertWizard does (see
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # 3,150+ tests
+$ make test           # 3,174 tests
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6
 $ make build          # wheel + sdist
 ```
 
-The test suite includes a **mock CA** (`tests/mock_ca.py`) that speaks the same
+The test suite includes a **mock CA** (`sandbox_ca/mock_ca.py`, re-exported as
+`tests/mock_ca.py`) that speaks the same
 XML protocol over real TLS, with an RSA root signing an ECDSA intermediate, and a
 raw fault-injection server (`tests/raw_server.py`) that can send malformed
 status lines, truncated bodies, slow bytes, resets, redirects and oversized
