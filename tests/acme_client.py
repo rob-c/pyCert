@@ -46,12 +46,18 @@ def sign_jws(key, protected: dict, payload) -> bytes:
     protected_b64 = b64e(json.dumps(protected, separators=(",", ":")).encode())
     payload_b64 = "" if payload is None else b64e(json.dumps(payload, separators=(",", ":")).encode())
     signed = (protected_b64 + "." + payload_b64).encode("ascii")
+    alg = protected.get("alg", "RS256")
     if isinstance(key, rsa.RSAPrivateKey):
-        signature = key.sign(signed, padding.PKCS1v15(), hashes.SHA256())
+        hash_alg = {"RS256": hashes.SHA256(), "RS384": hashes.SHA384(), "RS512": hashes.SHA512()}.get(alg)
+        if hash_alg is None:
+            hash_alg = hashes.SHA256()
+        signature = key.sign(signed, padding.PKCS1v15(), hash_alg)
     elif isinstance(key, ec.EllipticCurvePrivateKey):
-        hash_alg = {"secp256r1": hashes.SHA256, "secp384r1": hashes.SHA384, "secp521r1": hashes.SHA512}[
-            key.public_key().curve.name
-        ]()
+        hash_alg = {"ES256": hashes.SHA256(), "ES384": hashes.SHA384(), "ES512": hashes.SHA512()}.get(alg)
+        if hash_alg is None:
+            hash_alg = {"secp256r1": hashes.SHA256, "secp384r1": hashes.SHA384, "secp521r1": hashes.SHA512}[
+                key.public_key().curve.name
+            ]()
         der = key.sign(signed, ec.ECDSA(hash_alg))
         from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
@@ -69,13 +75,17 @@ def sign_jws(key, protected: dict, payload) -> bytes:
 
 
 class ACMEClient:
-    def __init__(self, server: ACMEServer, key=None):
+    def __init__(self, server: ACMEServer, key=None, alg=None):
         self.server = server
         self.key = key or rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.jwk = jwk_for(self.key)
         self.kid = ""
         self.nonce = ""
-        if isinstance(self.key, rsa.RSAPrivateKey):
+        if alg:
+            self.alg = alg
+            self.kid = ""
+            self.nonce = ""
+        elif isinstance(self.key, rsa.RSAPrivateKey):
             self.alg = "RS256"
         elif isinstance(self.key, ec.EllipticCurvePrivateKey):
             self.alg = {"secp256r1": "ES256", "secp384r1": "ES384", "secp521r1": "ES512"}[

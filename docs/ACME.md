@@ -5,6 +5,9 @@ e-Science/OpenCA-style CA state used by the CertWizard listener.  This lets
 `certbot` issue, renew and revoke certificates without speaking the UK-CA XML
 or PPPK protocols directly.
 
+> For the wider STFC architecture, assurance, policy and migration plan, read
+> [`STFC-ACME-MODERNISATION.md`](STFC-ACME-MODERNISATION.md).
+
 > This is a test CA. It issues certificates without real domain or identity
 > validation unless you select the HTTP challenge mode. Never trust its CA or
 > certificates outside a test environment.

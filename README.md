@@ -55,7 +55,7 @@ workflow) are about 4,000 lines and can be reviewed end to end in an afternoon.
 | Waiting for signing | user clicks refresh repeatedly | `--wait` / `pycert wait`, exponential jitter, cancellable, exit code 3 on timeout |
 | PIN | SHA-1 hash, entered in a Swing dialog | SHA-1 hash (server requirement), generated once and shown in a modal/GUI |
 | Automation | GUI only | CLI + `--json` + exit codes + cron/launchd examples |
-| Tests | a couple of XML parser tests | 4,190+ tests (4,196 at the last check), including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
+| Tests | a couple of XML parser tests | 5,190+ tests (5,196 at the last check), including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
 | Documentation | `readme.txt` | README, configuration reference, protocol notes, CA-listener contract + Java sandbox, security model, migration guide |
 
 Everything above is verifiable from the sources: the Java template default is in
@@ -96,7 +96,7 @@ picks cryptography 3.3.x automatically.
 The package is validated on Python 3.6.15 with cryptography 3.3.2 in a
 container: install, `pycert selftest`, `init`, `config check`, live `ping`/`ras`
 and `doctor`, plus a full mock-CA request → download → PKCS#12 → renew → revoke
-flow.  The 4,196 test suite itself runs on a modern Python.
+flow.  The 5,196 test suite itself runs on a modern Python.
 
 ---
 
@@ -381,7 +381,7 @@ sandbox for the real Java client are documented in
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # 4,196 tests
+$ make test           # 5,196 tests
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6
 $ make build          # wheel + sdist
@@ -403,7 +403,8 @@ requests/certificates, RA approve/sign/reject, revocation, browser admin console
 and a Java jar/source patcher), see [`sandbox_ca/README.md`](sandbox_ca/README.md)
 and [`docs/CA_LISTENER.md`](docs/CA_LISTENER.md). The same mock CA also exposes
 an RFC 8555 ACME v2 endpoint for certbot/nginx; see
-[`docs/ACME.md`](docs/ACME.md).
+[`docs/ACME.md`](docs/ACME.md) and the detailed STFC modernisation dossier
+[`docs/STFC-ACME-MODERNISATION.md`](docs/STFC-ACME-MODERNISATION.md).
 
 `tests/test_certwizard_wire_parity.py` compares pyCert's captured requests with
 the Java project's golden wire fixtures for every operation.  If
@@ -411,9 +412,10 @@ the Java project's golden wire fixtures for every operation.  If
 present), it also runs the real Java client's complete lifecycle against the
 same sandbox CA and compares the two request multisets.
 
-`tests/test_acme_emulation.py` and `tests/test_acme_matrix.py` add roughly
-1,000 ACME v2/CA-emulation cases (routing, identifier validation, JWS
-rejection, order lifecycle, challenges, issuance, revocation, wildcard and CA
+`tests/test_acme_emulation.py`, `tests/test_acme_matrix.py` and
+`tests/test_acme_deep_matrix.py` add 1,000+ ACME v2/CA-emulation cases
+(routing, identifier validation, JWS algorithms/rejection, CSR matching, order
+lifecycle, HTTP-01, challenges, issuance, revocation, wildcard and CA
 manual-signing).  `tests/test_acme_certbot.py` runs a real certbot when
 `CERTBOT_BIN` is set.
 

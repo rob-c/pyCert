@@ -523,7 +523,8 @@ this automatically.
 The full mock CA lives in [`sandbox_ca/`](../sandbox_ca/) and
 shares its protocol code with the pyCert test suite (`tests/mock_ca.py` is a
 compatibility shim). The same server also exposes an RFC 8555 ACME v2 front-end
-for certbot/nginx; see [ACME.md](ACME.md).
+for certbot/nginx; see [ACME.md](ACME.md) and the STFC modernisation dossier
+[STFC-ACME-MODERNISATION.md](STFC-ACME-MODERNISATION.md).
 
 ### 16.1 Start it
 
