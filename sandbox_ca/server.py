@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
+from .acme import ACMEServer
 from .mock_ca import CertRecord, CSRRecord, MockCA, _der_cert, _pem
 from .ui import render_dashboard, render_login
 
@@ -45,6 +46,7 @@ class SandboxCA(MockCA):
         self.data_dir_path = Path(data_dir).expanduser().resolve()
         self.admin_token = admin_token
         self.state_path = self.data_dir_path / "state.json"
+        self.acme = None
         self.started_at = time.time()
         super().__init__(
             auto_approve=auto_approve,
@@ -91,6 +93,7 @@ class SandboxCA(MockCA):
             "ui_url": self.url
             + "/__sandbox__/ui"
             + (("?token=" + quote(self.admin_token, safe="")) if self.admin_token else ""),
+            "acme_directory": self.acme.directory_url() if self.acme is not None else "",
             "started_at": self.started_at,
         }
 
@@ -223,6 +226,44 @@ class SandboxCA(MockCA):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+    # -- ACME front-end ----------------------------------------------------
+    def start_acme(
+        self,
+        *,
+        host: "str | None" = None,
+        port: int = 0,
+        challenge_mode: str = "auto",
+        http_port: int = 80,
+        public_url: "str | None" = None,
+        auto_validate: "bool | None" = None,
+    ):
+        """Start the RFC 8555 front-end on its own TLS listener.
+
+        ``challenge_mode`` is ``auto`` (a self-contained sandbox), ``http``
+        (fetch certbot's webroot token) or ``manual`` (leave challenges for an
+        operator).  Returns the :class:`~sandbox_ca.acme.ACMEServer`.
+        """
+        if self.acme is not None:
+            return self.acme
+        self.acme = ACMEServer(
+            self,
+            host=host or self.host,
+            port=port,
+            public_url=public_url,
+            challenge_mode=challenge_mode,
+            http_port=http_port,
+            auto_validate=auto_validate,
+        )
+        self.acme.start()
+        self.write_info()
+        return self.acme
+
+    def stop(self) -> None:
+        if self.acme is not None:
+            self.acme.stop()
+            self.acme = None
+        super().stop()
 
     # -- admin HTTP API ----------------------------------------------------
     def _handler_class(self):

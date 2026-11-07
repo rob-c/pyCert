@@ -56,6 +56,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--java-jar", help="optional CertWizard jar to patch immediately after starting")
     parser.add_argument("--java-kit-out", help="output path for --java-jar (default: <jar>-sandbox.jar)")
+    parser.add_argument(
+        "--acme-port",
+        type=int,
+        help="start the ACME v2 front-end on this TLS port (0 picks a free port)",
+    )
+    parser.add_argument(
+        "--acme-challenge-mode",
+        choices=("auto", "http", "manual"),
+        default="auto",
+        help="ACME challenge validation: auto, certbot webroot HTTP fetch, or manual",
+    )
+    parser.add_argument(
+        "--acme-http-port",
+        type=int,
+        default=80,
+        help="port used when fetching http-01 challenges",
+    )
+    parser.add_argument(
+        "--acme-public-url",
+        help="public ACME base URL (for a reverse proxy; default https://<hostname>:<acme-port>)",
+    )
     return parser
 
 
@@ -89,6 +110,19 @@ def main(argv=None) -> int:
         print("sandbox: could not start: %s" % exc, file=sys.stderr)
         return 1
 
+    if args.acme_port is not None:
+        try:
+            ca.start_acme(
+                port=args.acme_port,
+                challenge_mode=args.acme_challenge_mode,
+                http_port=args.acme_http_port,
+                public_url=args.acme_public_url,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print("sandbox: could not start ACME front-end: %s" % exc, file=sys.stderr)
+            ca.stop()
+            return 1
+
     info = ca.info()
     print("pyCert sandbox CA")
     print("  URL:              %s" % info["url"])
@@ -101,6 +135,8 @@ def main(argv=None) -> int:
     ))
     print("  admin token:      %s" % (token or "(disabled)"))
     print("  admin console:    %s" % info["ui_url"])
+    if info.get("acme_directory"):
+        print("  ACME directory:   %s" % info["acme_directory"])
     print("  metadata:         %s" % ca.info_path)
     print()
     print("Point the Java client at %s (see docs/CA_LISTENER.md)." % info["url"])

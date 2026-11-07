@@ -52,6 +52,18 @@ trust store if you prefer). Admin endpoints are under `/__sandbox__/` on the
 same HTTPS port; the CSR/certificate database is `state.json` and survives
 restarts.
 
+## ACME v2
+
+```sh
+python3 -m sandbox_ca --data-dir .sandbox-ca --acme-port 14000 --acme-challenge-mode auto
+```
+
+Point certbot at the printed `https://localhost:14000/acme/directory` (use
+`--no-verify-ssl` locally, or trust `.sandbox-ca/root.pem`). The ACME front-end
+maps orders to the same CA CSR/sign/download/revoke state and supports
+`http-01`, `dns-01`, wildcard, auto and webroot validation. See
+[`docs/ACME.md`](../docs/ACME.md) for certbot and nginx examples.
+
 ## Headless Java flow
 
 ```sh

@@ -1,0 +1,30 @@
+# Example nginx server using a certificate obtained from the sandbox ACME
+# endpoint.  Replace sandbox.example, /var/www/html and the certificate paths.
+# This is test-only: the certificate chains to the sandbox test CA.
+
+server {
+    listen 80;
+    server_name sandbox.example;
+
+    # certbot --webroot -w /var/www/html
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type text/plain;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name sandbox.example;
+
+    ssl_certificate     /etc/letsencrypt/live/sandbox.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/sandbox.example/privkey.pem;
+
+    # The sandbox issuing chain, for diagnostics / explicit trust:
+    # ssl_trusted_certificate /path/to/.sandbox-ca/ca-chain.pem;
+
+    location / {
+        root /var/www/html;
+        index index.html;
+    }
+}
