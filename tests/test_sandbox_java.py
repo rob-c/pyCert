@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from pycert.compat import not_valid_after, not_valid_before
 from pycert.csr import build_csr
 from sandbox_ca.java_kit import _CLASS_PATH, _CONFIG_PATH, _OLD_PINS, build_jar_kit
 from sandbox_ca.mock_ca import CSRRecord, MockCA, _spki_b64
@@ -303,3 +304,84 @@ def test_java_kit_refuses_a_jar_with_unknown_pins(tmp_path, sandbox):
         jar.writestr(_CONFIG_PATH, "ngsca.cert.o=old\n")
     with pytest.raises(SystemExit, match="different bundled CA pins"):
         build_jar_kit(source, tmp_path / "out.jar", sandbox.info())
+
+
+def test_state_survives_restart_and_can_be_looked_up(tmp_path):
+    data_dir = tmp_path / "persistent-state"
+    first = SandboxCA(data_dir=data_dir, port=0, auto_approve=False, admin_token="test-token")
+    try:
+        key = _key()
+        request = _csr(key, cn="persistent user")
+        status, _, _ = _request(first, "POST", "/CSR", _user_xml(request), {"Content-Type": "application/xml"})
+        assert status == 201
+        csr_id = next(iter(first.csrs.values())).id
+        status, _, _ = _admin(first, "POST", "/__sandbox__/sign", {"id": csr_id})
+        assert status == 200
+        cert_id = first.certificates[next(iter(first.certificates))].id
+        assert (data_dir / "state.json").exists()
+    finally:
+        first.stop()
+
+    second = SandboxCA(data_dir=data_dir, port=0, auto_approve=False, admin_token="test-token")
+    try:
+        assert len(second.csrs) == 1
+        assert len(second.certificates) == 1
+        lookup = b"<PublicKey>" + _spki_b64(key.public_key()).encode() + b"</PublicKey>"
+        status, _, body = _request(
+            second, "POST", "/resources/resource/publickey/pk", lookup, {"Content-Type": "application/xml"}
+        )
+        assert status == 200
+        assert ("<id>%d</id>" % cert_id).encode() in body
+        status, _, body = _admin(second, "GET", "/__sandbox__/status")
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["certificates"][0]["id"] == cert_id
+    finally:
+        second.stop()
+
+
+def test_reject_is_reported_and_persisted(sandbox):
+    request = _csr(_key(), cn="reject me")
+    status, _, _ = _request(sandbox, "POST", "/CSR", _user_xml(request), {"Content-Type": "application/xml"})
+    assert status == 201
+    csr_id = next(iter(sandbox.csrs.values())).id
+    status, _, body = _admin(
+        sandbox, "POST", "/__sandbox__/reject", {"id": csr_id, "reason": "not this time"}
+    )
+    assert status == 200
+    assert json.loads(body)["changed"] == [csr_id]
+    # A rejected request must never be auto-issued by a later status lookup.
+    sandbox.auto_approve = True
+    sandbox.sign_after_polls = 0
+    key = next(iter(sandbox.csrs.values())).csr.public_key()
+    lookup = b"<PublicKey>" + _spki_b64(key).encode() + b"</PublicKey>"
+    status, _, body = _request(
+        sandbox, "POST", "/resources/resource/publickey/pk", lookup, {"Content-Type": "application/xml"}
+    )
+    assert status == 200
+    assert b"<status>REJECTED</status>" in body
+    assert b"<reason>not this time</reason>" in body
+    assert not sandbox.certificates
+
+
+def test_admin_ui_requires_the_token_and_renders_the_dashboard(sandbox):
+    status, _, body = _request(sandbox, "GET", "/__sandbox__/ui")
+    assert status == 200
+    assert b"Admin token" in body
+    status, _, body = _request(sandbox, "GET", "/__sandbox__/ui?token=test-token")
+    assert status == 200
+    assert b"pyCert sandbox CA" in body
+    assert b"Certificate requests" in body
+
+
+def test_validity_setting_is_applied_to_issued_certificates(sandbox):
+    status, _, _ = _admin(sandbox, "POST", "/__sandbox__/settings", {"valid_days": 30})
+    assert status == 200
+    request = _csr(_key(), cn="short lived user")
+    status, _, _ = _request(sandbox, "POST", "/CSR", _user_xml(request), {"Content-Type": "application/xml"})
+    assert status == 201
+    csr_id = next(iter(sandbox.csrs.values())).id
+    sandbox.sign(csr_id)
+    cert = next(iter(sandbox.certificates.values())).cert
+    lifetime = (not_valid_after(cert) - not_valid_before(cert)).days
+    assert 28 <= lifetime <= 30

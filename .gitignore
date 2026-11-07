@@ -17,3 +17,4 @@ secrets.json
 # sandbox CA state and private keys
 .sandbox-ca/
 sandbox.json
+state.json

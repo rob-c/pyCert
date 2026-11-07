@@ -100,6 +100,7 @@ def main(argv=None) -> int:
         "auto-sign" if ca.auto_approve else "manual", ca.sign_after_polls
     ))
     print("  admin token:      %s" % (token or "(disabled)"))
+    print("  admin console:    %s" % info["ui_url"])
     print("  metadata:         %s" % ca.info_path)
     print()
     print("Point the Java client at %s (see docs/CA_LISTENER.md)." % info["url"])

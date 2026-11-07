@@ -86,6 +86,7 @@ class CSRRecord:
     cert_id: "int | None" = None
     pin_hash: str = ""
     kind: str = "user"
+    reject_reason: str = ""
 
 
 @dataclass
@@ -174,6 +175,8 @@ class MockCA:
         self.require_email_match = True
         self.reject_duplicate = True
         self.new_csr_status = "NEW"
+        self.valid_days = 365
+        self.host_valid_days = 365
         self.fault_delay = 0.0
         self.host = host
         self.motd = motd
@@ -181,6 +184,7 @@ class MockCA:
         self.data_dir = Path(data_dir) if data_dir is not None else Path(self._tempdir())
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._build_hierarchy()
+        self._load_state()
         self._build_server_certificate()
 
         self.httpd = _QuietServer((host, port), self._handler_class())
@@ -214,6 +218,13 @@ class MockCA:
     @property
     def plain_url(self) -> str:
         return f"http://127.0.0.1:{self.aia_port}"
+
+    # -- persistence hooks (no-ops for the in-memory test double) ---------
+    def _load_state(self) -> None:
+        """Restore CSR/certificate state, if this CA persists it."""
+
+    def _persist_state(self) -> None:
+        """Persist CSR/certificate state after a mutation, if configured."""
 
     def stop(self) -> None:
         self.httpd.shutdown()
@@ -288,6 +299,8 @@ class MockCA:
                         "subject": certs.name_to_string(record.csr.subject),
                         "polls": record.polls,
                         "cert_id": record.cert_id,
+                        "pin_hash": record.pin_hash,
+                        "reject_reason": record.reject_reason,
                     }
                 )
             certificates = []
@@ -310,6 +323,8 @@ class MockCA:
             "pppk_mode": self.pppk_mode,
             "lookup_mode": self.lookup_mode,
             "download_mode": self.download_mode,
+            "valid_days": self.valid_days,
+            "host_valid_days": self.host_valid_days,
             "csrs": csrs,
             "certificates": certificates,
         }
@@ -331,7 +346,10 @@ class MockCA:
             self.require_email_match = True
             self.reject_duplicate = True
             self.new_csr_status = "NEW"
+            self.valid_days = 365
+            self.host_valid_days = 365
             self.fault_delay = 0.0
+            self._persist_state()
 
     # -- hierarchy ---------------------------------------------------------
     def _build_hierarchy(self) -> None:
@@ -560,9 +578,11 @@ class MockCA:
         return result
 
     def issue(
-        self, csr: x509.CertificateSigningRequest, *, kind: str = "user", days: int = 365
+        self, csr: x509.CertificateSigningRequest, *, kind: str = "user", days: "int | None" = None
     ) -> x509.Certificate:
         now = dt.datetime.now(dt.timezone.utc)
+        if days is None:
+            days = self.host_valid_days if kind == "host" else self.valid_days
         builder = (
             x509.CertificateBuilder()
             .subject_name(csr.subject)
@@ -628,14 +648,16 @@ class MockCA:
     def sign_all(self) -> None:
         with self.lock:
             for record in self.csrs.values():
-                if record.cert_id is None:
+                if record.cert_id is None and record.status not in ("REJECTED", "DELETED"):
                     self._sign_csr(record)
+            self._persist_state()
 
     def approve_all(self) -> None:
         with self.lock:
             for record in self.csrs.values():
                 if record.status in ("NEW", "RENEW"):
                     record.status = "APPROVED"
+            self._persist_state()
 
     # -- administration (also used by the standalone sandbox API) ---------
     def _find_csr(self, csr_id: int) -> "CSRRecord | None":
@@ -663,7 +685,9 @@ class MockCA:
             for record in self._selected_csrs(csr_id, all_records):
                 if record.cert_id is None and record.status in ("NEW", "RENEW", "APPROVED"):
                     record.status = "APPROVED"
+                    record.reject_reason = ""
                     changed.append(record.id)
+            self._persist_state()
         return changed
 
     def sign(self, csr_id: "int | None" = None, *, all_records: bool = False) -> "list[int]":
@@ -671,18 +695,43 @@ class MockCA:
         changed = []
         with self.lock:
             for record in self._selected_csrs(csr_id, all_records):
-                if record.cert_id is None:
+                if record.cert_id is None and record.status not in ("REJECTED", "DELETED"):
                     self._sign_csr(record)
                     changed.append(record.id)
+            self._persist_state()
         return changed
+
+    def reject(self, csr_id: "int | None" = None, reason: str = "rejected by the RA", *,
+               all_records: bool = False) -> "list[int]":
+        """Reject one pending CSR (or all); returns the IDs changed."""
+        changed = []
+        with self.lock:
+            for record in self._selected_csrs(csr_id, all_records):
+                if record.cert_id is None and record.status not in ("REJECTED", "DELETED", "VALID"):
+                    record.status = "REJECTED"
+                    record.reject_reason = str(reason)
+                    changed.append(record.id)
+            self._persist_state()
+        return changed
+
+    def _revoke_record(self, record: CertRecord, reason: str) -> None:
+        """Mark a certificate revoked and mirror that in its CSR row."""
+        record.status = "REVOKED"
+        record.revoke_reason = reason
+        for csr in self.csrs.values():
+            if csr.cert_id == record.id:
+                csr.status = "REVOKED"
+        self._persist_state()
 
     def revoke_certificate(self, cert_id: int, reason: str = "unspecified") -> bool:
         with self.lock:
-            record = self.certificates.get(int(cert_id))
+            try:
+                record = self.certificates.get(int(cert_id))
+            except (TypeError, ValueError):
+                return False
             if record is None:
                 return False
-            record.status = "REVOKED"
-            record.revoke_reason = reason
+            self._revoke_record(record, reason)
             return True
 
     def clear_state(self) -> None:
@@ -695,6 +744,7 @@ class MockCA:
             self.faults.clear()
             self.next_csr_id = 1000
             self.next_cert_id = 5000
+            self._persist_state()
 
     # -- PPPK verification -------------------------------------------------
     def _find_auth_cert(
@@ -943,8 +993,14 @@ class MockCA:
                             + "</text></Motd></CA>"
                         ).encode(),
                     )
-                if path == "/ca/issuer.pem":
+                if path in ("/ca/issuer.pem", "/ca/issuing-ca.pem"):
                     return self._send(200, _pem(ca.intermediate).encode(), "application/x-pem-file")
+                if path == "/ca/root.pem":
+                    return self._send(200, _pem(ca.root).encode(), "application/x-pem-file")
+                if path == "/ca/chain.pem":
+                    return self._send(
+                        200, (_pem(ca.root) + _pem(ca.intermediate)).encode(), "application/x-pem-file"
+                    )
                 if path.startswith("/certificate/"):
                     return self._certificate(path.rsplit("/", 1)[-1])
                 return self._send(404, b"not found", "text/plain")
@@ -1011,8 +1067,13 @@ class MockCA:
                     record = CSRRecord(ca.next_csr_id, request, email, pin_hash=pin)
                     record.status = ca.new_csr_status
                     ca.csrs[spki] = record
-                    if ca.auto_approve and ca.sign_after_polls <= 0:
+                    if (
+                        ca.auto_approve
+                        and ca.sign_after_polls <= 0
+                        and record.status in ("NEW", "RENEW", "APPROVED")
+                    ):
                         ca._sign_csr(record)
+                    ca._persist_state()
                 return self._send(201, b"")
 
             def _submit_bulk(self, body: bytes):
@@ -1105,8 +1166,13 @@ class MockCA:
                     record = CSRRecord(ca.next_csr_id, request, email, pin_hash=pin, kind=kind)
                     record.status = "RENEW" if kind == "renew" else ca.new_csr_status
                     ca.csrs[spki] = record
-                    if ca.auto_approve and ca.sign_after_polls <= 0:
+                    if (
+                        ca.auto_approve
+                        and ca.sign_after_polls <= 0
+                        and record.status in ("NEW", "RENEW", "APPROVED")
+                    ):
                         ca._sign_csr(record)
+                    ca._persist_state()
                 return self._send(201, b"")
 
             def _lookup(self, body: bytes):
@@ -1124,7 +1190,12 @@ class MockCA:
                     if record is None:
                         return self._send(404, b"")
                     record.polls += 1
-                    if record.cert_id is None and ca.auto_approve and record.polls >= ca.sign_after_polls:
+                    if (
+                        record.cert_id is None
+                        and ca.auto_approve
+                        and record.polls >= ca.sign_after_polls
+                        and record.status in ("NEW", "RENEW", "APPROVED")
+                    ):
                         if record.status in ("NEW", "RENEW"):
                             record.status = "APPROVED"
                         ca._sign_csr(record)
@@ -1144,9 +1215,11 @@ class MockCA:
                         if include_id:
                             block.append(f"<id>{cert_record.id}</id>")
                         block.append(f"<status>{status}</status>")
-                        block.append("<owner>" + certs.name_to_string(cert_record.cert.subject) + "</owner>")
+                        block.append(
+                            "<owner>" + _xml_escape(certs.name_to_string(cert_record.cert.subject)) + "</owner>"
+                        )
                         block.append("<role>RA Operator</role>")
-                        block.append(f"<useremail>{record.email}</useremail>")
+                        block.append("<useremail>" + _xml_escape(record.email) + "</useremail>")
                         block.append(
                             "<startdate>"
                             + not_valid_before(cert_record.cert).strftime("%d/%m/%Y")
@@ -1157,7 +1230,11 @@ class MockCA:
                             + not_valid_after(cert_record.cert).strftime("%d/%m/%Y")
                             + "</enddate>"
                         )
-                        block.append("<lifedays>365</lifedays>")
+                        lifetime = max(
+                            1,
+                            (not_valid_after(cert_record.cert) - not_valid_before(cert_record.cert)).days,
+                        )
+                        block.append("<lifedays>%d</lifedays>" % lifetime)
                         block.append(
                             "<renew>" + not_valid_after(cert_record.cert).strftime("%d/%m/%Y") + "</renew>"
                         )
@@ -1184,11 +1261,16 @@ class MockCA:
                         parts.append("<CSRs><CSR>")
                         parts.append(f"<id>{record.id}</id>")
                         parts.append(f"<status>{status}</status>")
-                        parts.append("<owner>" + certs.name_to_string(record.csr.subject) + "</owner>")
+                        parts.append(
+                            "<owner>" + _xml_escape(certs.name_to_string(record.csr.subject)) + "</owner>"
+                        )
                         parts.append("<role>RA Operator</role>")
-                        parts.append(f"<useremail>{record.email}</useremail>")
+                        parts.append("<useremail>" + _xml_escape(record.email) + "</useremail>")
+                        if record.reject_reason:
+                            parts.append("<reason>" + _xml_escape(record.reject_reason) + "</reason>")
                         parts.append("</CSR></CSRs>")
                     parts.append("</resource></resources>")
+                    ca._persist_state()
                 return self._send(200, "".join(parts).encode())
 
             def _certificate(self, cert_id: str):
@@ -1230,8 +1312,7 @@ class MockCA:
                 mode = ca.pppk_mode
                 if mode == "no_challenge":
                     with ca.lock:
-                        record.status = "REVOKED"
-                        record.revoke_reason = reason
+                        ca._revoke_record(record, reason)
                     return self._send(201, b"")
                 if mode == "opaque":
                     if not self.headers.get("opaque"):
@@ -1246,8 +1327,7 @@ class MockCA:
                         self.close_connection = True
                         return None
                     with ca.lock:
-                        record.status = "REVOKED"
-                        record.revoke_reason = reason
+                        ca._revoke_record(record, reason)
                     return self._send(201, b"")
                 if not self.headers.get("response"):
                     key = record.cert.public_key()
@@ -1273,8 +1353,7 @@ class MockCA:
                 if not ok:
                     return self._send(403, ca._error_xml(f"PPPK verification failed: {problem}"))
                 with ca.lock:
-                    record.status = "REVOKED"
-                    record.revoke_reason = reason
+                    ca._revoke_record(record, reason)
                 return self._send(201, b"")
 
         return Handler

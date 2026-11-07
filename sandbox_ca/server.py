@@ -8,11 +8,17 @@ trusting the same CA across restarts.
 
 import hashlib
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
-from .mock_ca import MockCA, _der_cert, _pem
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+
+from .mock_ca import CertRecord, CSRRecord, MockCA, _der_cert, _pem
+from .ui import render_dashboard, render_login
 
 
 class SandboxCA(MockCA):
@@ -38,6 +44,7 @@ class SandboxCA(MockCA):
     ):
         self.data_dir_path = Path(data_dir).expanduser().resolve()
         self.admin_token = admin_token
+        self.state_path = self.data_dir_path / "state.json"
         self.started_at = time.time()
         super().__init__(
             auto_approve=auto_approve,
@@ -76,8 +83,14 @@ class SandboxCA(MockCA):
             "issuer_dn": name_to_string(self.intermediate.subject),
             "auto_approve": self.auto_approve,
             "sign_after_polls": self.sign_after_polls,
+            "valid_days": self.valid_days,
+            "host_valid_days": self.host_valid_days,
             "admin_token": self.admin_token,
             "data_dir": str(self.data_dir_path),
+            "state_file": str(self.state_path),
+            "ui_url": self.url
+            + "/__sandbox__/ui"
+            + (("?token=" + quote(self.admin_token, safe="")) if self.admin_token else ""),
             "started_at": self.started_at,
         }
 
@@ -87,6 +100,129 @@ class SandboxCA(MockCA):
             self.info_path.chmod(0o600)
         except OSError:
             pass
+
+    # -- persistent CSA/certificate state --------------------------------
+    STATE_FORMAT = 1
+
+    def _load_state(self) -> None:
+        """Restore the RA queue and issued certificates from ``state.json``.
+
+        The CA hierarchy is persisted separately.  Keeping the request/cert
+        state too means a Java client can be stopped, the sandbox restarted,
+        and the certificate it already downloaded can still be looked up,
+        renewed or revoked.
+        """
+        path = self.state_path
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "cannot read sandbox state %s: %s (remove the file to start clean)" % (path, exc)
+            )
+        if not isinstance(data, dict) or data.get("format") not in (None, 1):
+            raise RuntimeError("unsupported sandbox state format in %s" % path)
+        with self.lock:
+            self.csrs.clear()
+            self.certificates.clear()
+            for item in data.get("certificates") or []:
+                try:
+                    cert = x509.load_pem_x509_certificate(item["pem"].encode())
+                except (KeyError, ValueError) as exc:
+                    raise RuntimeError("invalid persisted certificate in %s: %s" % (path, exc))
+                cert_id = int(item["id"])
+                self.certificates[cert_id] = CertRecord(
+                    cert_id,
+                    cert,
+                    status=str(item.get("status") or "VALID"),
+                    spki_b64=str(item.get("spki_b64") or ""),
+                    revoke_reason=str(item.get("revoke_reason") or ""),
+                )
+            for item in data.get("csrs") or []:
+                try:
+                    csr = x509.load_pem_x509_csr(item["pem"].encode())
+                    spki = str(item["spki"])
+                except (KeyError, ValueError) as exc:
+                    raise RuntimeError("invalid persisted CSR in %s: %s" % (path, exc))
+                self.csrs[spki] = CSRRecord(
+                    int(item["id"]),
+                    csr,
+                    str(item.get("email") or ""),
+                    status=str(item.get("status") or "NEW"),
+                    polls=int(item.get("polls") or 0),
+                    cert_id=int(item["cert_id"]) if item.get("cert_id") is not None else None,
+                    pin_hash=str(item.get("pin_hash") or ""),
+                    kind=str(item.get("kind") or "user"),
+                    reject_reason=str(item.get("reject_reason") or ""),
+                )
+            self.next_csr_id = max(
+                [int(data.get("next_csr_id") or 1000)] + [record.id + 1 for record in self.csrs.values()]
+            )
+            self.next_cert_id = max(
+                [int(data.get("next_cert_id") or 5000)]
+                + [record.id + 1 for record in self.certificates.values()]
+            )
+            self.valid_days = int(data.get("valid_days") or self.valid_days)
+            self.host_valid_days = int(data.get("host_valid_days") or self.host_valid_days)
+
+    def _persist_state(self) -> None:
+        """Atomically write the request/certificate database.
+
+        Called with ``MockCA.lock`` held.  The file is a plain JSON document
+        (PEM, not private keys) and is mode 0600 because it contains pending
+        request metadata and the issued certificates.
+        """
+        if getattr(self, "state_path", None) is None:
+            return
+        data = {
+            "format": self.STATE_FORMAT,
+            "next_csr_id": self.next_csr_id,
+            "next_cert_id": self.next_cert_id,
+            "valid_days": self.valid_days,
+            "host_valid_days": self.host_valid_days,
+            "csrs": [
+                {
+                    "spki": spki,
+                    "id": record.id,
+                    "pem": record.csr.public_bytes(serialization.Encoding.PEM).decode("ascii"),
+                    "email": record.email,
+                    "status": record.status,
+                    "polls": record.polls,
+                    "cert_id": record.cert_id,
+                    "pin_hash": record.pin_hash,
+                    "kind": record.kind,
+                    "reject_reason": record.reject_reason,
+                }
+                for spki, record in self.csrs.items()
+            ],
+            "certificates": [
+                {
+                    "id": record.id,
+                    "pem": record.cert.public_bytes(serialization.Encoding.PEM).decode("ascii"),
+                    "status": record.status,
+                    "spki_b64": record.spki_b64,
+                    "revoke_reason": record.revoke_reason,
+                }
+                for record in self.certificates.values()
+            ],
+        }
+        text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+        self.data_dir_path.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".state.", dir=str(self.data_dir_path))
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(temporary, 0o600)
+            except OSError:
+                pass
+            os.replace(temporary, str(self.state_path))
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     # -- admin HTTP API ----------------------------------------------------
     def _handler_class(self):
@@ -127,6 +263,8 @@ class SandboxCA(MockCA):
 
             def do_GET(self):
                 path = urlsplit(self.path).path
+                if path in ("/__sandbox__/ui", "/__sandbox__/ui/"):
+                    return self._admin_ui()
                 if path.startswith("/__sandbox__/"):
                     if not self._admin_ok():
                         return None
@@ -140,6 +278,17 @@ class SandboxCA(MockCA):
                         return None
                     return self._admin_post(path)
                 return super().do_POST()
+
+            def _admin_ui(self):
+                query = parse_qs(urlsplit(self.path).query)
+                supplied = self.headers.get("X-Sandbox-Token")
+                if supplied is None:
+                    supplied = query.get("token", [None])[0]
+                if sandbox.admin_token is not None and supplied != sandbox.admin_token:
+                    body = render_login(error=bool(supplied)).encode()
+                    return self._send(200, body, "text/html; charset=utf-8")
+                body = render_dashboard(sandbox.admin_token or "").encode()
+                return self._send(200, body, "text/html; charset=utf-8")
 
             def _admin_get(self, path: str):
                 if path in ("/__sandbox__/status", "/__sandbox__/status/"):
@@ -191,6 +340,13 @@ class SandboxCA(MockCA):
                 if path in ("/__sandbox__/sign", "/__sandbox__/sign/"):
                     changed = sandbox.sign(payload.get("id"), all_records=bool(payload.get("all")))
                     return self._send_json(200, {"changed": changed})
+                if path in ("/__sandbox__/reject", "/__sandbox__/reject/"):
+                    changed = sandbox.reject(
+                        payload.get("id"),
+                        str(payload.get("reason") or "rejected by the RA"),
+                        all_records=bool(payload.get("all")),
+                    )
+                    return self._send_json(200, {"changed": changed})
                 if path in ("/__sandbox__/revoke", "/__sandbox__/revoke/"):
                     try:
                         cert_id = int(payload["id"])
@@ -235,6 +391,15 @@ class SandboxCA(MockCA):
                             if not isinstance(payload["auto_approve"], bool):
                                 return self._send_json(400, {"error": "auto_approve must be a boolean"})
                             sandbox.auto_approve = payload["auto_approve"]
+                        for key in ("valid_days", "host_valid_days"):
+                            if key in payload:
+                                try:
+                                    value = int(payload[key])
+                                except (TypeError, ValueError):
+                                    return self._send_json(400, {"error": "%s must be an integer" % key})
+                                if value < 1 or value > 3650:
+                                    return self._send_json(400, {"error": "%s is out of range" % key})
+                                setattr(sandbox, key, value)
                         if "sign_after_polls" in payload:
                             try:
                                 value = int(payload["sign_after_polls"])
@@ -251,6 +416,7 @@ class SandboxCA(MockCA):
                                 setattr(sandbox, key, value)
                         if "motd" in payload:
                             sandbox.motd = str(payload["motd"])
+                        sandbox._persist_state()
                     return self._send_json(200, {"settings": sandbox.status_snapshot()})
                 return self._send_json(404, {"error": "unknown sandbox admin endpoint"})
 

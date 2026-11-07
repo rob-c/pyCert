@@ -76,15 +76,23 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("id", nargs="?", type=int)
         cmd.add_argument("--all", action="store_true")
 
+    reject = sub.add_parser("reject", help="reject a pending CSR")
+    reject.add_argument("id", nargs="?", type=int)
+    reject.add_argument("--all", action="store_true")
+    reject.add_argument("--reason", default="rejected by the RA")
+
     revoke = sub.add_parser("revoke", help="revoke an issued certificate")
     revoke.add_argument("id", type=int)
     revoke.add_argument("--reason", default="unspecified")
 
     sub.add_parser("reset", help="forget CSRs, certificates and captured requests")
+    sub.add_parser("ui", help="print the admin console URL")
 
     settings = sub.add_parser("settings", help="change auto-sign or fault-injection settings")
     settings.add_argument("--auto-approve", choices=("true", "false"))
     settings.add_argument("--sign-after-polls", type=int)
+    settings.add_argument("--valid-days", type=int)
+    settings.add_argument("--host-valid-days", type=int)
     settings.add_argument(
         "--pppk-mode",
         choices=("normal", "no_challenge", "opaque", "bad_keyid", "bad_response"),
@@ -124,6 +132,9 @@ def main(argv=None) -> int:
         server["url"] = args.url
     if args.command == "status":
         return _call(server, args, "GET", "/__sandbox__/status")
+    if args.command == "ui":
+        print(server.get("ui_url") or (server["url"].rstrip("/") + "/__sandbox__/ui"))
+        return 0
     if args.command == "requests":
         return _call(server, args, "GET", "/__sandbox__/requests?limit=%d" % args.limit)
     if args.command in ("approve", "sign"):
@@ -137,6 +148,17 @@ def main(argv=None) -> int:
             "/__sandbox__/%s" % args.command,
             {"id": args.id, "all": bool(args.all)},
         )
+    if args.command == "reject":
+        if args.id is None and not args.all:
+            print("sandbox admin: give a CSR id or --all", file=sys.stderr)
+            return 2
+        return _call(
+            server,
+            args,
+            "POST",
+            "/__sandbox__/reject",
+            {"id": args.id, "all": bool(args.all), "reason": args.reason},
+        )
     if args.command == "revoke":
         return _call(
             server, args, "POST", "/__sandbox__/revoke", {"id": args.id, "reason": args.reason}
@@ -149,6 +171,10 @@ def main(argv=None) -> int:
             payload["auto_approve"] = args.auto_approve == "true"
         if args.sign_after_polls is not None:
             payload["sign_after_polls"] = args.sign_after_polls
+        if args.valid_days is not None:
+            payload["valid_days"] = args.valid_days
+        if args.host_valid_days is not None:
+            payload["host_valid_days"] = args.host_valid_days
         for key in ("pppk_mode", "lookup_mode", "download_mode"):
             value = getattr(args, key)
             if value is not None:

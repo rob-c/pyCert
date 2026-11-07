@@ -518,9 +518,9 @@ is listed in `ngsca.issuer.dn`. If that setting does not match the sandbox
 issuing CA, the GUI will appear to ignore the certificate. The Java kit sets
 this automatically.
 
-## 16. Runnable sandbox CA
+## 16. Full runnable mock CA
 
-The reference implementation lives in [`sandbox_ca/`](../sandbox_ca/) and
+The full mock CA lives in [`sandbox_ca/`](../sandbox_ca/) and
 shares its protocol code with the pyCert test suite (`tests/mock_ca.py` is a
 compatibility shim).
 
@@ -537,7 +537,8 @@ The server prints:
 * the HTTPS URL (default `https://localhost:8443`);
 * the root and issuing CA SHA-256 fingerprints;
 * the issuing CA's RFC 2253 DN (for `ngsca.issuer.dn`);
-* an admin token and the path to `.sandbox-ca/sandbox.json`.
+* an admin token, the admin-console URL and the path to
+  `.sandbox-ca/sandbox.json`.
 
 Useful options:
 
@@ -545,7 +546,7 @@ Useful options:
 |---|---|
 | `--host` / `--port` | listener address; port 0 picks a free port |
 | `--public-host NAME` | add a DNS/IP SAN for a client on another machine (repeatable) |
-| `--data-dir DIR` | persistent CA hierarchy and `sandbox.json` |
+| `--data-dir DIR` | persistent CA hierarchy, `state.json` and `sandbox.json` |
 | `--auto-sign` (default) | approve and issue after `--sign-after-polls` status lookups |
 | `--manual` | leave requests pending for the admin API |
 | `--sign-after-polls N` | 0 = issue on submission; 1 = first status lookup |
@@ -553,42 +554,54 @@ Useful options:
 | `--no-admin-auth` | disable admin auth (loopback-only sandbox) |
 | `--java-jar JAR` | patch a Java jar immediately after starting |
 
-The CA hierarchy is persisted, so restarting the sandbox does not invalidate a
-patched Java client. The TLS leaf is regenerated on each start (it is trusted
-through the persisted CA, so rotation is harmless). CSR and certificate state
-is held in memory and is deliberately not persisted: restarting starts a clean
-RA queue and certificate list.
+The CA hierarchy and the CSR/certificate database (`state.json`) are persisted,
+so restarting the sandbox does not invalidate a patched Java client and does
+not lose issued certificates: a certificate already downloaded by the Java
+client can still be looked up, renewed or revoked after a restart. The TLS leaf
+is regenerated on each start (it is trusted through the persisted CA, so
+rotation is harmless). Use the admin UI's **Clear all requests/certs** button,
+or `sandbox_ca.admin reset`, to start a clean RA queue. The patched Java URLs
+contain the port, so restart on the same `--port` or repatch the jar.
 
 ### 16.2 Admin API
 
 Admin endpoints are on the same TLS listener under `/__sandbox__/` and require
-`X-Sandbox-Token: <token>` (or `Authorization: Bearer <token>`).
+`X-Sandbox-Token: <token>` (or `Authorization: Bearer <token>`). The browser
+console is at `/__sandbox__/ui` and uses `?token=<token>` for its first load;
+its JavaScript then sends the token as a header. A browser will warn about the
+sandbox CA until you accept the localhost exception or import `root.pem`.
 
 | Method | Path | Body | Purpose |
 |---|---|---|---|
+| GET | `/__sandbox__/ui?token=...` | — | browser console: approve, sign, reject, revoke, settings, request log |
 | GET | `/__sandbox__/status` | — | CSRs, certificates, modes, fingerprints |
 | GET | `/__sandbox__/requests?limit=N` | — | recently captured requests (method, path, headers, body) |
 | POST | `/__sandbox__/approve` | `{"id": 1001}` or `{"all": true}` | mark NEW/RENEW as APPROVED |
 | POST | `/__sandbox__/sign` | `{"id": 1001}` or `{"all": true}` | issue certificate(s) |
+| POST | `/__sandbox__/reject` | `{"id": 1001, "reason": "..."}` or `{"all": true}` | reject a pending CSR |
 | POST | `/__sandbox__/revoke` | `{"id": 5000, "reason": "..."}` | revoke an issued certificate |
 | POST | `/__sandbox__/reset` | `{}` | forget CSRs/certs/captured requests |
-| POST | `/__sandbox__/settings` | see below | auto-sign and fault-injection modes |
+| POST | `/__sandbox__/settings` | see below | auto-sign, validity and fault-injection modes |
 | GET | `/__sandbox__/ca.pem` | — | root + issuing CA PEM |
 
 Example with the helper:
 
 ```sh
 python3 -m sandbox_ca.admin --data-dir .sandbox-ca status
+python3 -m sandbox_ca.admin --data-dir .sandbox-ca ui
 python3 -m sandbox_ca.admin --data-dir .sandbox-ca approve 1001
 python3 -m sandbox_ca.admin --data-dir .sandbox-ca sign 1001
+python3 -m sandbox_ca.admin --data-dir .sandbox-ca reject 1001 --reason "wrong RA"
 python3 -m sandbox_ca.admin --data-dir .sandbox-ca revoke 5000 --reason "Key compromise"
+python3 -m sandbox_ca.admin --data-dir .sandbox-ca settings --valid-days 30
 ```
 
-`settings` accepts `auto_approve` (bool), `sign_after_polls` (int), and the
-fault-injection modes `pppk_mode`, `lookup_mode`, `download_mode`, `info_mode`
-(the same modes used by the pyCert test suite: `no_challenge`, `opaque`,
-`bad_keyid`, `bad_response`, `no_inline`, `csr_only`, `malformed`,
-`wrong_pem`, `bare_pem`, `wrong_cert`, etc.).
+`settings` accepts `auto_approve` (bool), `sign_after_polls` (int),
+`valid_days` / `host_valid_days` (certificate lifetime), and the fault-injection
+modes `pppk_mode`, `lookup_mode`, `download_mode`, `info_mode` (the same modes
+used by the pyCert test suite: `no_challenge`, `opaque`, `bad_keyid`,
+`bad_response`, `no_inline`, `csr_only`, `malformed`, `wrong_pem`, `bare_pem`,
+`wrong_cert`, etc.).
 
 ### 16.3 Patch and run the Java client
 
@@ -615,6 +628,12 @@ python3 -m sandbox_ca.java_kit \
 java -jar /tmp/CertWizard-sandbox.jar --self-test
 java -jar /tmp/CertWizard-sandbox.jar /tmp/certwizard-sandbox-data
 ```
+
+Open the admin-console URL printed by the sandbox (also in
+`.sandbox-ca/sandbox.json`). In `--manual` mode, approve and sign each request
+there; the Java GUI then picks the certificate up on its next status check. In
+auto-sign mode the console is still useful for inspecting traffic, rejecting a
+request or changing validity/fault settings.
 
 `--self-test` is headless and verifies the patched pins and truststore. It does
 not contact the network. The GUI then asks for a data directory; use a fresh
@@ -702,6 +721,9 @@ Use this when implementing a listener for the Java client:
 * Anyone with the admin token can issue certificates. Keep the listener on
   loopback, or use a firewall and a strong token; `--no-admin-auth` is only for
   isolated local tests.
+* The browser console URL contains the token and the browser will warn about
+  the sandbox CA until it is trusted. Avoid shared browser profiles and shared
+  logs when using it.
 * The sandbox issues certificates without identity proofing. Do not install
   them in a real trust store or use them outside the test host.
 * When patching a JAR, the original signature is removed. Verify the patched

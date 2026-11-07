@@ -1,11 +1,11 @@
-# sandbox_ca — a CA listener for the Java CertWizard client
+# sandbox_ca — a full mock CA for the Java CertWizard client
 
 This directory contains two things:
 
 * `mock_ca.py` — the protocol-level CA implementation shared with pyCert's test
   suite (real TLS, PPPK, status transitions, fault injection);
 * `server.py`, `__main__.py` and `admin.py` — a standalone, persistent sandbox
-  with an admin API;
+  with a browser admin console and JSON admin API;
 * `java_kit.py` — a patcher that points a built (or source) CertWizard at the
   sandbox and replaces its pinned CA certificates.
 
@@ -36,13 +36,21 @@ client will only trust the sandbox CA; do not use it against the real CA.
 
 ```sh
 python3 -m sandbox_ca.admin --data-dir .sandbox-ca status
+python3 -m sandbox_ca.admin --data-dir .sandbox-ca ui
 python3 -m sandbox_ca.admin --data-dir .sandbox-ca approve 1001
 python3 -m sandbox_ca.admin --data-dir .sandbox-ca sign 1001
+python3 -m sandbox_ca.admin --data-dir .sandbox-ca reject 1001 --reason "wrong RA"
 python3 -m sandbox_ca.admin --data-dir .sandbox-ca requests --limit 50
 ```
 
 The token is in `.sandbox-ca/sandbox.json` (mode 0600) and is printed at
-startup. Admin endpoints are under `/__sandbox__/` on the same HTTPS port.
+startup, along with the console URL. Open that URL in a browser to approve,
+sign, reject or revoke requests, change validity, inspect captured traffic and
+toggle fault modes. The browser will warn that the sandbox CA is not trusted;
+accept the exception for `localhost` (or import `root.pem` into the browser's
+trust store if you prefer). Admin endpoints are under `/__sandbox__/` on the
+same HTTPS port; the CSR/certificate database is `state.json` and survives
+restarts.
 
 ## Headless Java flow
 
@@ -62,10 +70,18 @@ and compatibility checklist are in
 
 * The CA hierarchy (and the Java truststore pins) persists in `--data-dir`; the
   TLS leaf is regenerated on each start and is trusted through that hierarchy.
-* Issued requests/certificates are held in memory and are lost on restart;
-  restarting is cheap, but resubmit if the Java client is still pointing at a
-  certificate from a previous run.
+* The CA hierarchy, CSR queue and issued certificates are persisted in
+  `--data-dir` (`state.json`), so a restart does not lose a certificate the
+  Java client has already downloaded. The `--auto-sign`/`--manual` choice and
+  fault modes are process options; pass the desired mode on restart.
+* The patched Java URLs embed the listening port. Restart on the same `--port`
+  (or repatch the jar) if you want to reuse a previously patched client.
+* `state.json` can be removed (or cleared through the console) to reset the RA
+  queue; remove the whole `--data-dir` only when you deliberately want a new
+  CA (and repatch the Java client).
 * `--auto-sign` issues after `--sign-after-polls` status lookups; `--manual`
   leaves approval/signing to the admin CLI.
 * Do not bind to a public interface without a strong `--admin-token` and a
   firewall.
+* The admin console URL contains the token, so avoid pasting it into shared
+  logs or using a shared browser profile.
