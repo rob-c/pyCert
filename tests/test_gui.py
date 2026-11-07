@@ -9,7 +9,7 @@ def _app(config):
     from pycert.gui import PyCertApp
 
     try:
-        return PyCertApp(str(config.path))
+        return PyCertApp(str(config.path), startup_ping=False)
     except tkinter.TclError as exc:  # pragma: no cover - headless CI
         pytest.skip(f"no display available: {exc}")
 

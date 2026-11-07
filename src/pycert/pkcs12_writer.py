@@ -204,9 +204,12 @@ def encode_pkcs12(
     mac_salt = os.urandom(16)
     mac_key = pkcs12_kdf(_bmp_password(password), mac_salt, 3, mac_iterations, mac_length, mac_hash)
     mac = stdlib_hmac.new(mac_key, authenticated_safe, hash_function).digest()
-    mac_data = asn1.seq(
+    mac_parts = [
         asn1.seq(asn1.seq(asn1.oid(mac_oid), asn1.null()), asn1.octet_string(mac)),
         asn1.octet_string(mac_salt),
-        asn1.integer(mac_iterations),
-    )
+    ]
+    if mac_iterations != 1:
+        # MacData.iterations has DEFAULT 1 and DER omits default values.
+        mac_parts.append(asn1.integer(mac_iterations))
+    mac_data = asn1.seq(*mac_parts)
     return asn1.seq(asn1.integer(3), auth_safe, mac_data)

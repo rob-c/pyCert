@@ -90,6 +90,24 @@ def run_doctor(ctx, *, offline=False):
     except Exception as exc:  # noqa: BLE001
         results.append(_result("CA chain", FAIL, str(exc)))
 
+    try:
+        config_stat = os.lstat(config.path)
+        mode = stat.S_IMODE(config_stat.st_mode)
+        if stat.S_ISLNK(config_stat.st_mode):
+            results.append(_result("configuration file", WARN, "%s is a symlink" % config.path))
+        elif mode & 0o002:
+            results.append(
+                _result("configuration file", FAIL, "%s is world-writable (%s)" % (config.path, oct(mode)))
+            )
+        elif mode & 0o020:
+            results.append(
+                _result("configuration file", WARN, "%s is group-writable (%s)" % (config.path, oct(mode)))
+            )
+        else:
+            results.append(_result("configuration file", OK, "%s (%s)" % (config.path, oct(mode))))
+    except OSError as exc:
+        results.append(_result("configuration file", FAIL, str(exc)))
+
     for warning in config.warnings:
         results.append(_result("configuration warning", WARN, warning))
     if not config.ca.tls_verify:
@@ -113,8 +131,33 @@ def run_doctor(ctx, *, offline=False):
         results.append(_result("file permissions", FAIL, "; ".join(audit[:5])))
     else:
         results.append(_result("file permissions", OK, "no world/group-readable files"))
+    corrupt = ctx.store.corrupt_files()
+    if corrupt:
+        results.append(_result("stored state", FAIL, "; ".join("%s: %s" % item for item in corrupt[:5])))
+    else:
+        results.append(_result("stored state", OK, "all state files parse"))
+    weak = []
+    for state in ctx.store.list():
+        try:
+            certificate = ctx.store.load_certificate(state)
+        except Exception:  # noqa: BLE001 - no certificate yet is normal
+            continue
+        warning = certs.key_strength_warning(certificate.public_key())
+        if warning:
+            weak.append("%s: %s" % (state.alias, warning))
+    if weak:
+        results.append(_result("key strength", WARN, "; ".join(weak[:5])))
+    else:
+        results.append(_result("key strength", OK, "all stored certificates meet the key policy"))
 
     try:
+        if ctx.secrets.backend == "file":
+            if ctx.secrets.path.is_symlink():
+                results.append(
+                    _result("secret file", FAIL, "refusing a symlinked secret file: %s" % ctx.secrets.path)
+                )
+            else:
+                results.append(_result("secret file", OK, str(ctx.secrets.path)))
         if ctx.secrets.exists(config.secrets.account):
             results.append(_result("saved secret", OK, str(ctx.secrets)))
         else:

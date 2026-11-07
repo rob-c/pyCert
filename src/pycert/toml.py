@@ -22,6 +22,9 @@ from typing import Any, Dict, List, Tuple
 
 __all__ = ["TOMLDecodeError", "loads", "load"]
 
+MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+MAX_DEPTH = 64
+
 _EOF = "\x00"
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 _INT_DEC = re.compile(r"[+-]?(?:0|[1-9](?:_?[0-9])*)$")
@@ -61,9 +64,13 @@ def load(fp) -> Dict[str, Any]:
 
 def loads(text) -> Dict[str, Any]:
     if isinstance(text, bytes):
+        if len(text) > MAX_DOCUMENT_BYTES:
+            raise TOMLDecodeError("configuration is larger than %d bytes" % MAX_DOCUMENT_BYTES)
         text = text.decode("utf-8-sig")
     if not isinstance(text, str):
         raise TOMLDecodeError("configuration must be a string")
+    if len(text.encode("utf-8")) > MAX_DOCUMENT_BYTES:
+        raise TOMLDecodeError("configuration is larger than %d bytes" % MAX_DOCUMENT_BYTES)
     return _Parser(text).parse()
 
 
@@ -78,6 +85,7 @@ class _Parser:
         self.line_start = 0
         self.root = {}  # type: Dict[str, Any]
         self.current = self.root
+        self.depth = 0
         # Object-id based bookkeeping keeps array-of-tables elements distinct.
         self.header_tables = set()  # dicts declared with [table]
         self.header_arrays = set()  # lists declared with [[table]]
@@ -410,6 +418,9 @@ class _Parser:
         return value
 
     def _array(self) -> List[Any]:
+        self.depth += 1
+        if self.depth > MAX_DEPTH:
+            self._fail("arrays are nested too deeply")
         self._advance()  # [
         items = []  # type: List[Any]
         while True:
@@ -418,6 +429,7 @@ class _Parser:
                 self._fail("unterminated array")
             if self._peek() == "]":
                 self._advance()
+                self.depth -= 1
                 return items
             items.append(self._parse_value())
             self._skip_array_blank()
@@ -426,6 +438,7 @@ class _Parser:
                 continue
             if self._peek() == "]":
                 self._advance()
+                self.depth -= 1
                 return items
             self._fail("expected ',' or ']' in array")
 
@@ -451,12 +464,16 @@ class _Parser:
                 self._seal_value(nested)
 
     def _inline_table(self) -> Dict[str, Any]:
+        self.depth += 1
+        if self.depth > MAX_DEPTH:
+            self._fail("inline tables are nested too deeply")
         self._advance()  # {
         table = {}  # type: Dict[str, Any]
         self.inline_tables.add(id(table))
         self._skip_spaces()
         if self._peek() == "}":
             self._advance()
+            self.depth -= 1
             return table
         while True:
             self._skip_spaces()
@@ -484,6 +501,7 @@ class _Parser:
                 continue
             if self._peek() == "}":
                 self._advance()
+                self.depth -= 1
                 return table
             self._fail("expected ',' or '}' in inline table")
 

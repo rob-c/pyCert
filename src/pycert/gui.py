@@ -1009,7 +1009,7 @@ class SettingsDialog(tk.Toplevel):
 
 
 class PyCertApp(tk.Tk):
-    def __init__(self, config_path: "str | None" = None):
+    def __init__(self, config_path: "str | None" = None, *, startup_ping: bool = True):
         super().__init__()
         self.config_path = config_path
         self.cfg: Config = load_config(config_path)
@@ -1034,7 +1034,8 @@ class PyCertApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh_list()
         self.after(120, self._drain_queue)
-        self.after(400, self._startup_ping)
+        if startup_ping:
+            self.after(400, self._startup_ping)
 
     # -- styling -----------------------------------------------------------
     def _build_style(self) -> None:

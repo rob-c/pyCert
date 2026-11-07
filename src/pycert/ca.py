@@ -47,6 +47,8 @@ from .util import clamp_text, format_fingerprint
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_XML_BYTES = 4 * 1024 * 1024
+MAX_XML_DEPTH = 100
+MAX_XML_ELEMENTS = 100000
 USER_AGENT_FALLBACK = "pyCert/1.0"
 
 REVOCATION_REASONS = (
@@ -428,6 +430,8 @@ class CAClient:
         if challenge.status == 201:
             # Some server versions accept the request without a challenge.
             return Submission(True, 201, "CSR submitted")
+        if challenge.status == 202:
+            return Submission(False, 202, "the CA rejected the CSR", self.server_message(challenge.body))
         if challenge.status != 401:
             raise self._error(challenge, "submitting authenticated CSR")
 
@@ -628,9 +632,21 @@ def _safe_xml(data: bytes) -> ET.Element:
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise ProtocolError("server returned XML with a DOCTYPE/ENTITY declaration; refusing it")
     try:
-        return ET.fromstring(data)
+        root = ET.fromstring(data)
     except ET.ParseError as exc:
         raise ProtocolError(f"could not parse server XML: {exc}") from exc
+    count = 0
+    stack = [(root, 1)]
+    while stack:
+        element, depth = stack.pop()
+        count += 1
+        if depth > MAX_XML_DEPTH:
+            raise ProtocolError("server XML is nested too deeply")
+        if count > MAX_XML_ELEMENTS:
+            raise ProtocolError("server XML contains too many elements")
+        for child in element:
+            stack.append((child, depth + 1))
+    return root
 
 
 def _local(tag: str) -> str:

@@ -43,8 +43,10 @@ from .workflow import (
     poll_once,
     refresh_all,
     renew,
+    renew_due,
     revoke,
     verify,
+    watch,
 )
 
 # ---------------------------------------------------------------------------
@@ -756,10 +758,66 @@ def cmd_verify(args) -> int:
 def cmd_renew(args) -> int:
     console = Console(json_mode=args.json, quiet=args.quiet)
     ctx = _context(args)
+    pins: "list[str]" = [args.pin] if args.pin else []
+    if args.due is not None:
+        if args.alias:
+            raise PyCertError("use either an alias or --due, not both")
+        if args.due < 0:
+            raise PyCertError("--due must be zero or more days")
+        if not args.dry_run:
+            _confirm(args, "Renew all certificates due for renewal?", "all")
+        results = renew_due(
+            ctx,
+            args.due,
+            dry_run=args.dry_run,
+            progress=console.progress,
+            on_pin=pins.append,
+            wait=args.wait,
+            timeout=parse_duration(args.timeout),
+            interval=parse_duration(args.interval),
+            export=not args.no_export,
+            require_verified_chain=not args.allow_unverified_chain,
+            key_algorithm=args.key_algorithm,
+            rsa_bits=args.rsa_bits,
+            ec_curve=args.ec_curve,
+            email=args.email,
+            san_dns=args.san_dns,
+            san_email=args.san_email,
+            san_ip=args.san_ip,
+        )
+        payload = {
+            "dry_run": args.dry_run,
+            "renewed": [
+                {
+                    "alias": state.alias,
+                    "status": state.status,
+                    "renewal": state.renewal,
+                    "not_after": state.cert.not_after,
+                    "error": error,
+                }
+                for state, error in results
+            ],
+            "pins": pins,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            if not results:
+                console.info("No certificates are due for renewal.")
+            for state, error in results:
+                if error:
+                    console.info(f"{state.alias}: FAILED — {error}")
+                elif args.dry_run:
+                    console.info(f"{state.alias}: would renew ({state.days_remaining} days remaining)")
+                else:
+                    console.info(f"{state.alias}: {state.status}")
+        return 1 if any(error for _state, error in results) else 0
+    if not args.alias:
+        raise PyCertError("an alias or --due DAYS is required")
     state = ctx.store.get(args.alias)
     _confirm(args, f"Renew '{state.alias}' ({state.cn})?", state.alias)
     pin = _read_pin(args)
-    pins: "list[str]" = [args.pin] if args.pin else []
+    pins = [pin] if pin else []
     state = renew(
         ctx,
         args.alias,
@@ -794,6 +852,32 @@ def cmd_renew(args) -> int:
         if state.renewal:
             console.info(f"Run 'pycert wait {state.alias}' once the RA has approved it.")
     return 0
+
+
+def cmd_watch(args) -> int:
+    console = Console(json_mode=args.json, quiet=args.quiet)
+    if args.max_cycles is not None and args.max_cycles < 1:
+        raise PyCertError("--max-cycles must be at least 1")
+    ctx = _context(args)
+    max_cycles = 1 if args.once else args.max_cycles
+    report = watch(
+        ctx,
+        interval=parse_duration(args.interval),
+        export=not args.no_export,
+        max_cycles=max_cycles,
+        progress=console.progress,
+        require_verified_chain=not args.allow_unverified_chain,
+    )
+    if args.json:
+        print(json.dumps(report.as_dict(), indent=2))
+    else:
+        console.info(
+            "watch finished: %d cycle(s), %d polled, %d downloaded, %d error(s)"
+            % (report.cycles, report.polled, report.downloaded, len(report.errors))
+        )
+        for alias, error in report.errors:
+            console.info(f"  {alias}: {error}")
+    return 1 if report.errors else 0
 
 
 def cmd_revoke(args) -> int:
@@ -1151,7 +1235,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     renew_cmd = sub.add_parser("renew", help="request a renewal authenticated by the current key")
     _add_common(renew_cmd, suppress=True)
-    renew_cmd.add_argument("alias")
+    renew_cmd.add_argument("alias", nargs="?")
+    renew_cmd.add_argument(
+        "--due", type=int, metavar="DAYS", help="renew every certificate expiring within DAYS"
+    )
+    renew_cmd.add_argument("--dry-run", action="store_true", help="only list what --due would renew")
     renew_cmd.add_argument("--email")
     renew_cmd.add_argument("--key-algorithm", choices=["rsa", "ec"])
     renew_cmd.add_argument("--rsa-bits", type=int)
@@ -1204,6 +1292,23 @@ def build_parser() -> argparse.ArgumentParser:
     secret.add_argument("--length", type=int, default=32)
     secret.add_argument("--show", action="store_true", help="print the secret (get)")
     secret.set_defaults(func=cmd_secret)
+
+    watch_cmd = sub.add_parser("watch", help="poll pending requests and export them as they are signed")
+    _add_common(watch_cmd, suppress=True)
+    watch_cmd.add_argument(
+        "--interval", default=str(DEFAULT_WAIT_INTERVAL), help="poll interval (default 60s)"
+    )
+    watch_cmd.add_argument("--once", action="store_true", help="run a single cycle")
+    watch_cmd.add_argument("--max-cycles", type=int, help="stop after N cycles")
+    watch_cmd.add_argument(
+        "--no-export", action="store_true", help="download certificates but do not write .p12 files"
+    )
+    watch_cmd.add_argument(
+        "--allow-unverified-chain",
+        action="store_true",
+        help="accept certificates whose chain does not validate",
+    )
+    watch_cmd.set_defaults(func=cmd_watch)
 
     doctor = sub.add_parser("doctor", help="diagnose the installation and the connection")
     _add_common(doctor, suppress=True)

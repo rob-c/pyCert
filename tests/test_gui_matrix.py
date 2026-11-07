@@ -72,7 +72,7 @@ def test_set_text_helper():
 
 def _app(config):
     try:
-        return PyCertApp(str(config.path))
+        return PyCertApp(str(config.path), startup_ping=False)
     except tkinter.TclError as exc:  # pragma: no cover
         pytest.skip("no display: %s" % exc)
 

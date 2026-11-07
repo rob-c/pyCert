@@ -284,7 +284,9 @@ _PEM_BLOCK_RE = re.compile(
 )
 
 
-def split_pem(data: bytes, labels: Optional[Iterable[str]] = None) -> List[Tuple[str, bytes]]:
+def split_pem(
+    data: bytes, labels: Optional[Iterable[str]] = None, max_blocks: int = 200
+) -> List[Tuple[str, bytes]]:
     """Return ``(label, der)`` pairs from a PEM bundle.
 
     A deliberate replacement for the 39+ ``load_pem_x509_certificates`` helper;
@@ -295,6 +297,8 @@ def split_pem(data: bytes, labels: Optional[Iterable[str]] = None) -> List[Tuple
     wanted = set(labels) if labels else None
     blocks = []
     for match in _PEM_BLOCK_RE.finditer(data):
+        if len(blocks) >= max_blocks:
+            raise ValueError("PEM bundle contains more than %d blocks" % max_blocks)
         label = match.group(1).decode("ascii")
         if wanted is not None and label not in wanted:
             continue

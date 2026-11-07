@@ -126,6 +126,7 @@ class SecretConfig:
     key_account: str = ""  # empty = reuse the [secrets].account secret
     file: str = ""
     command: str = ""
+    command_timeout: float = 15.0
     env_var: str = "PYCERT_P12_PASSPHRASE"
 
 
@@ -400,6 +401,7 @@ class Config:
                 "key_account": self.secrets.key_account,
                 "file": self.secrets.file,
                 "command": self.secrets.command,
+                "command_timeout": self.secrets.command_timeout,
                 "env_var": self.secrets.env_var,
             },
             "chain": [
@@ -593,6 +595,7 @@ def load_config(explicit: "str | Path | None" = None) -> Config:
         key_account=_get_str(secrets_data, "key_account", "", "secrets"),
         file=_get_str(secrets_data, "file", "", "secrets"),
         command=_get_str(secrets_data, "command", "", "secrets"),
+        command_timeout=_get_float(secrets_data, "command_timeout", 15.0, "secrets"),
         env_var=_get_str(secrets_data, "env_var", "PYCERT_P12_PASSPHRASE", "secrets"),
     )
 
@@ -722,6 +725,8 @@ def _validate(config: Config) -> None:
         )
     if config.secrets.backend == "command" and not config.secrets.command:
         raise ConfigError("secrets.command is required when secrets.backend = 'command'")
+    if not 0 < config.secrets.command_timeout <= 300:
+        raise ConfigError("secrets.command_timeout must be between 0 and 300 seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -836,6 +841,8 @@ def render_config(config: Config, *, chain_comments: bool = True) -> str:
     lines.append(f"key_account = {_q(config.secrets.key_account)}")
     lines.append(f"file = {_q(config.secrets.file)}")
     lines.append(f"command = {_q(config.secrets.command)}")
+    lines.append("# Timeout for keychain/secret-tool/external command calls (seconds).")
+    lines.append(f"command_timeout = {config.secrets.command_timeout!r}")
     lines.append(f"env_var = {_q(config.secrets.env_var)}")
     lines.append("")
     lines.append("[chain]")

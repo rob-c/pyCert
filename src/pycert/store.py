@@ -36,6 +36,7 @@ from .util import (
     ensure_dir,
     iso,
     parse_iso,
+    read_private_file,
     slugify,
 )
 
@@ -45,6 +46,7 @@ except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
 STATE_VERSION = 1
+MAX_STATE_BYTES = 2 * 1024 * 1024
 STATE_FILE = "state.json"
 KEY_FILE = "key.pem"
 CSR_FILE = "request.csr"
@@ -278,6 +280,7 @@ class Store:
         self.data_dir = Path(data_dir)
         self.requests_dir = self.data_dir / "requests"
         self._lock_guard = threading.Lock()
+        self._create_lock = threading.Lock()
         self._rlocks = {}  # path -> threading.RLock (thread-level, reentrant)
         self._lock_handles = {}  # path -> open file holding the flock
         self._lock_counts = {}  # path -> nesting depth
@@ -290,7 +293,7 @@ class Store:
         for state_file in sorted(self.requests_dir.glob(f"*/{STATE_FILE}")):
             try:
                 states.append(self._read(state_file))
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, PyCertError):
                 continue
         states.sort(key=lambda s: s.created_at)
         return states
@@ -341,11 +344,12 @@ class Store:
 
     # -- creation ----------------------------------------------------------
     def new_state(self, *, alias: str, type: str, cn: str, email: str) -> RequestState:
-        slug = self._unique_slug(alias)
-        state = RequestState(alias=alias, slug=slug, type=type, cn=cn, email=email)
-        ensure_dir(self.path(state), DIR_MODE)
-        self.save(state)
-        return state
+        with self._create_lock:
+            slug = self._unique_slug(alias)
+            state = RequestState(alias=alias, slug=slug, type=type, cn=cn, email=email)
+            ensure_dir(self.path(state), DIR_MODE)
+            self.save(state)
+            return state
 
     def _unique_slug(self, alias: str) -> str:
         base = slugify(alias)
@@ -371,6 +375,8 @@ class Store:
 
     # -- persistence -------------------------------------------------------
     def _read(self, state_file: Path) -> RequestState:
+        if state_file.stat().st_size > MAX_STATE_BYTES:
+            raise PyCertError("stored state is larger than %d bytes: %s" % (MAX_STATE_BYTES, state_file))
         data = json.loads(state_file.read_text(encoding="utf-8"))
         return RequestState.from_dict(data)
 
@@ -416,7 +422,14 @@ class Store:
             depth = self._lock_counts.get(key, 0)
             if depth == 0 and fcntl is not None:
                 lock_path = self.path(state) / ".lock"
-                handle = open(lock_path, "a+")  # noqa: SIM115 - kept open while the flock is held
+                flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                try:
+                    fd = os.open(str(lock_path), flags, SECRET_FILE_MODE)
+                except OSError as exc:
+                    raise PyCertError("cannot open the state lock %s: %s" % (lock_path, exc))
+                handle = os.fdopen(fd, "a+")
                 try:
                     os.chmod(lock_path, SECRET_FILE_MODE)
                 except OSError:  # pragma: no cover - read-only directory
@@ -451,7 +464,7 @@ class Store:
         path = self.file(state, KEY_FILE)
         if not path.is_file():
             raise NotFound(f"private key not found for '{state.alias}': {path}")
-        return certs.load_private_key(path.read_bytes(), password)
+        return certs.load_private_key(read_private_file(path), password)
 
     def save_csr(self, state: RequestState, csr) -> Path:
         return atomic_write(self.file(state, CSR_FILE), csr_module.csr_pem(csr), SECRET_FILE_MODE)
@@ -549,12 +562,27 @@ class Store:
                 if mode & 0o077:
                     problems.append(f"directory {path} has mode {oct(mode)} (expected 0700)")
             for name in files:
-                if name == ".lock":
+                if name in (".lock", ".lock.ensure", ".lock.file"):
                     continue
                 path = Path(root) / name
+                if path.is_symlink():
+                    problems.append(f"file {path} is a symlink; private files must be regular files")
+                    continue
                 mode = path.stat().st_mode & 0o777
                 if mode & 0o077:
                     problems.append(f"file {path} has mode {oct(mode)} (expected 0600)")
+        return problems
+
+    def corrupt_files(self):
+        """Return ``(path, error)`` for state files that cannot be read."""
+        problems = []
+        if not self.requests_dir.is_dir():
+            return problems
+        for state_file in sorted(self.requests_dir.glob("*/%s" % STATE_FILE)):
+            try:
+                self._read_checked(state_file)
+            except PyCertError as exc:
+                problems.append((str(state_file), str(exc)))
         return problems
 
 

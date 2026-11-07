@@ -33,6 +33,9 @@ from .errors import CryptoError, PyCertError
 from .pkcs12_writer import DEFAULT_ITERATIONS, DEFAULT_MAC_ITERATIONS, encode_pkcs12
 from .util import SECRET_FILE_MODE, atomic_write, ensure_dir
 
+MAX_P12_BYTES = 16 * 1024 * 1024
+MAX_CHAIN_CERTIFICATES = 20
+
 
 @dataclass
 class P12Bundle:
@@ -67,6 +70,8 @@ def write_pkcs12(
         raise CryptoError(
             "refusing to write a PKCS#12 file: the certificate's public key does not match the private key"
         )
+    if chain and len(chain) > MAX_CHAIN_CERTIFICATES:
+        raise PyCertError("refusing to embed more than %d chain certificates" % MAX_CHAIN_CERTIFICATES)
     chain = _ordered_chain(certificate, chain or [])
     name = (friendly_name or certs.common_name(certificate.subject))[:64]
     try:
@@ -111,6 +116,9 @@ def write_pkcs12(
 
 def read_pkcs12(path: Path, password: str) -> P12Bundle:
     try:
+        size = Path(path).stat().st_size
+        if size > MAX_P12_BYTES:
+            raise PyCertError("PKCS#12 file is larger than %d bytes" % MAX_P12_BYTES)
         data = Path(path).read_bytes()
     except OSError as exc:
         raise PyCertError(f"cannot read PKCS#12 file {path}: {exc}") from exc
@@ -118,6 +126,8 @@ def read_pkcs12(path: Path, password: str) -> P12Bundle:
 
 
 def read_pkcs12_bytes(data: bytes, password: str) -> P12Bundle:
+    if len(data) > MAX_P12_BYTES:
+        raise PyCertError("PKCS#12 data is larger than %d bytes" % MAX_P12_BYTES)
     try:
         key, cert, extras = pkcs12.load_key_and_certificates(data, password.encode("utf-8"))
     except ValueError as exc:

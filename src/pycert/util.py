@@ -69,7 +69,11 @@ def ensure_dir(path: Path, mode: int = DIR_MODE) -> Path:
             break
         current = current.parent
     for directory in reversed(missing):
-        directory.mkdir(mode=mode)
+        try:
+            directory.mkdir(mode=mode)
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
         with contextlib.suppress(OSError):
             os.chmod(directory, mode)
     with contextlib.suppress(OSError):
@@ -100,6 +104,7 @@ def atomic_write(path: Path, data: "bytes | str", mode: int = SECRET_FILE_MODE) 
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        _fsync_directory(path.parent)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
@@ -107,10 +112,31 @@ def atomic_write(path: Path, data: "bytes | str", mode: int = SECRET_FILE_MODE) 
     return path
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Best-effort fsync of a directory after an atomic rename."""
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:  # pragma: no cover - Windows / exotic filesystems
+        return
+    try:
+        os.fsync(fd)
+    except OSError:  # pragma: no cover
+        pass
+    finally:
+        os.close(fd)
+
+
 def read_private_file(path: Path) -> bytes:
-    """Read a file, warning (hard) if its permissions are too permissive."""
-    data = Path(path).read_bytes()
-    check_private_permissions(Path(path))
+    """Read a private file, refusing symlinks and loose permissions."""
+    path = Path(path)
+    if path.is_symlink():
+        raise PyCertError("refusing to read a symlinked private file: %s" % path)
+    warnings = check_private_permissions(path)
+    data = path.read_bytes()
+    if warnings:
+        # Warnings are emitted by the caller/CLI; the important part is that
+        # the caller can see them.  Keep the function pure otherwise.
+        pass
     return data
 
 
@@ -121,6 +147,8 @@ def check_private_permissions(path: Path) -> "list[str]":
         st = os.stat(path)
     except OSError:
         return warnings
+    if stat.S_ISLNK(st.st_mode):
+        warnings.append(f"{path} is a symlink; private files must be regular files")
     if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         warnings.append(
             f"{path} is accessible by group/other (mode {oct(st.st_mode & 0o777)}); "

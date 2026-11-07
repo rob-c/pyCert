@@ -441,19 +441,21 @@ class Transport:
             raw = connection.getresponse()
             # Consume (rare) 1xx interim responses before the final one.
             interim = 0
-            while raw.status == 100 and interim < 5:
+            while 100 <= raw.status < 200 and raw.status != 101 and interim < 5:
                 raw.read()
                 raw = connection.getresponse()
                 interim += 1
-            if raw.status == 100:
+            if 100 <= raw.status < 200:
                 raise TransportError("too many interim 1xx responses", kind="protocol", retryable=False)
             if raw.version not in (10, 11):
                 raise TransportError(
                     "unsupported HTTP version %r" % (raw.version,), kind="protocol", retryable=False
                 )
-            if not (100 <= raw.status <= 599):
+            if not (100 <= raw.status <= 599) or raw.status == 101:
                 raise TransportError(
-                    "invalid HTTP status %r" % (raw.status,), kind="protocol", retryable=False
+                    "invalid or unsupported HTTP status %r" % (raw.status,),
+                    kind="protocol",
+                    retryable=False,
                 )
             header_list = raw.getheaders()
             header_size = sum(len(k) + len(v) + 4 for k, v in header_list)
@@ -466,6 +468,28 @@ class Transport:
             if header_size > self.config.max_header_bytes:
                 raise TransportError(
                     "response headers exceed %d bytes" % self.config.max_header_bytes,
+                    kind="protocol",
+                    retryable=False,
+                )
+            content_lengths = [value.strip() for key, value in header_list if key.lower() == "content-length"]
+            transfer_encodings = [
+                value.strip() for key, value in header_list if key.lower() == "transfer-encoding"
+            ]
+            if len(set(content_lengths)) > 1:
+                raise TransportError(
+                    "response has conflicting Content-Length headers", kind="protocol", retryable=False
+                )
+            if any(not value.isdigit() for value in content_lengths):
+                raise TransportError(
+                    "response has a non-numeric Content-Length", kind="protocol", retryable=False
+                )
+            if content_lengths and transfer_encodings:
+                raise TransportError(
+                    "response has both Content-Length and Transfer-Encoding", kind="protocol", retryable=False
+                )
+            if transfer_encodings and not transfer_encodings[-1].lower().endswith("chunked"):
+                raise TransportError(
+                    "unsupported Transfer-Encoding %r" % transfer_encodings[-1],
                     kind="protocol",
                     retryable=False,
                 )
@@ -736,6 +760,8 @@ def _same_host_redirect(current_url, location, allow_plaintext):
         )
     if parts.username or parts.password:
         raise TransportError("redirect with credentials refused", kind="redirect")
+    if any(ord(character) < 0x20 for character in target):
+        raise TransportError("redirect target contains control characters", kind="redirect")
     return target
 
 

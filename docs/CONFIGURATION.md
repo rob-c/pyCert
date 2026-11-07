@@ -166,6 +166,7 @@ configuration file’s directory, not the current working directory.
 | `key_account` | `""` | account for the key-at-rest passphrase; empty = reuse `account` |
 | `file` | `""` | JSON file for the `file` backend (default `<data_dir>/secrets.json`) |
 | `command` | `""` | shell command for the `command` backend |
+| `command_timeout` | `15` | timeout for keychain/secret-tool/command calls (seconds) |
 | `env_var` | `"PYCERT_P12_PASSPHRASE"` | variable for the `env` backend |
 
 Backends are described in [SECURITY.md](../SECURITY.md). Examples:
@@ -319,5 +320,19 @@ sha256 = "16383860bc6e61488ffb945e961963967c4fe8d73d2b2e9641d0b535cca4b845"
 * the PKCS#12 filename template contains `{cn}` or `{alias}`;
 * the secret backend is known, and `command` is set for the `command` backend;
 * every chain entry resolves and matches its pin.
+
+## Resource limits
+
+Independent of the network settings, pyCert bounds every untrusted input:
+
+| Input | Limit |
+|---|---|
+| TOML configuration | 4 MiB, nesting depth 64 |
+| Server XML | 4 MiB, depth 100, 100,000 elements |
+| Certificate | 1 MiB |
+| Certificate bundle | 4 MiB, 200 certificates |
+| PEM bundle | 200 blocks |
+| Stored state file | 2 MiB |
+| PKCS#12 file | 16 MiB, 20 chain certificates |
 
 Problems are fatal (exit 1), warnings are printed and do not stop anything.

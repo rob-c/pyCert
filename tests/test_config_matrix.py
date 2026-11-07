@@ -73,6 +73,7 @@ VALID = [
     ("secrets.key_account", "key-acct"),
     ("secrets.file", "secrets.json"),
     ("secrets.command", "pass show x"),
+    ("secrets.command_timeout", 12.5),
     ("secrets.env_var", "X_PASS"),
 ]
 

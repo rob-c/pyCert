@@ -1024,6 +1024,9 @@ def import_p12(
     """Import an existing PKCS#12 bundle so it can be renewed/exported by pyCert."""
     progress(f"Reading {path} ...")
     bundle: P12Bundle = p12_module.read_pkcs12(Path(path), password)
+    weak_key_warning = certs.key_strength_warning(bundle.key.public_key())
+    if weak_key_warning:
+        progress("warning: " + weak_key_warning)
     cn = certs.common_name(bundle.cert.subject)
     cert_type = "host" if "." in cn and " " not in cn else "user"
     name = alias or cn
@@ -1066,6 +1069,8 @@ def import_p12(
     state.set_status(STATUS_IMPORTED, f"imported from {path}")
     if not result.trusted:
         state.notes.extend(f"chain: {p}" for p in result.problems)
+    if weak_key_warning:
+        state.notes.append(weak_key_warning)
     ctx.store.save(state)
     progress(f"Imported '{cn}' as '{state.alias}'.")
     return state
@@ -1125,6 +1130,9 @@ def verify(
             certs.certificate_matches_key(certificate, key),
             "SubjectPublicKeyInfo comparison",
         )
+        warning = certs.key_strength_warning(key.public_key())
+        if warning:
+            report.warn(warning)
     now = now or datetime.now(timezone.utc)
     valid = certs.certificate_valid_at(certificate, now)
     report.add(
@@ -1198,6 +1206,147 @@ def install_pem(
             "0400; keep the directory private."
         )
     return {"cert": cert_path, "key": key_path}
+
+
+# ---------------------------------------------------------------------------
+# Long-running watch and batch renewal
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WatchReport:
+    cycles: int = 0
+    polled: int = 0
+    downloaded: int = 0
+    errors: "list[tuple[str, str]]" = field(default_factory=list)
+    stopped: bool = False
+
+    def as_dict(self):
+        return {
+            "cycles": self.cycles,
+            "polled": self.polled,
+            "downloaded": self.downloaded,
+            "errors": [{"alias": alias, "error": error} for alias, error in self.errors],
+            "stopped": self.stopped,
+        }
+
+
+def _watch_sleep(seconds, stop_event, sleep):
+    end = time.monotonic() + max(0.0, seconds)
+    while time.monotonic() < end:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        sleep(min(0.2, max(0.0, end - time.monotonic())))
+    return True
+
+
+def watch(
+    ctx: AppContext,
+    *,
+    interval: float = 60.0,
+    export: bool = True,
+    max_cycles: "int | None" = None,
+    stop_event=None,
+    progress: Progress = noop,
+    require_verified_chain: bool = True,
+    sleep=time.sleep,
+) -> WatchReport:
+    """Poll pending requests until stopped, downloading and exporting as they sign.
+
+    Only requests without a stored certificate (or with a renewal in flight) are
+    processed, so a request whose certificate is already stored is never
+    downloaded repeatedly.
+    """
+    report = WatchReport()
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            report.stopped = True
+            break
+        report.cycles += 1
+        pending = [
+            state
+            for state in ctx.store.pending()
+            if state.active_spki_b64 and (not state.cert.sha256 or state.renewal)
+        ]
+        if pending:
+            progress("watch: checking %d request(s)" % len(pending))
+        for state in pending:
+            if stop_event is not None and stop_event.is_set():
+                report.stopped = True
+                break
+            try:
+                outcome = poll_once(ctx, state, progress=progress, stop_event=stop_event)
+                report.polled += 1
+                if outcome.certificate is not None:
+                    download_and_export(
+                        ctx,
+                        outcome.state,
+                        stop_event=stop_event,
+                        certificate=outcome.certificate,
+                        cert_id=outcome.cert_id,
+                        progress=progress,
+                        export=export,
+                        require_verified_chain=require_verified_chain,
+                    )
+                    report.downloaded += 1
+                    progress("watch: certificate ready for %s" % state.alias)
+                elif outcome.terminal:
+                    progress("watch: %s is %s" % (state.alias, outcome.server_status))
+            except PyCertError as exc:
+                report.errors.append((state.alias, str(exc)))
+                progress("watch: %s: %s" % (state.alias, exc))
+        if report.stopped:
+            break
+        if max_cycles is not None and report.cycles >= max_cycles:
+            break
+        if pending:
+            progress("watch: sleeping for %.0fs" % interval)
+        delay = interval * (1 + random.uniform(-0.1, 0.1))
+        if not _watch_sleep(max(1.0, delay), stop_event, sleep):
+            report.stopped = True
+            break
+    return report
+
+
+def renew_due(
+    ctx: AppContext,
+    days: int = 30,
+    *,
+    dry_run: bool = False,
+    progress: Progress = noop,
+    on_pin=None,
+    **renew_options,
+):
+    """Renew every stored certificate expiring within *days*.
+
+    Returns a list of ``(state, error)`` pairs; ``error`` is None on success.
+    ``dry_run`` only selects and reports what would be renewed.
+    """
+    due = []
+    for state in ctx.store.list():
+        if state.status == STATUS_REVOKED or state.renewal:
+            continue
+        if not state.cert.not_after or not state.active_spki_b64:
+            continue
+        remaining = state.days_remaining
+        if remaining is None or remaining > days:
+            continue
+        due.append(state)
+    due.sort(key=lambda item: item.days_remaining if item.days_remaining is not None else 10**9)
+    results = []
+    for state in due:
+        if dry_run:
+            progress("would renew %s (%s days remaining)" % (state.alias, state.days_remaining))
+            results.append((state, None))
+            continue
+        progress("renewing %s (%s days remaining)" % (state.alias, state.days_remaining))
+        try:
+            renewed = renew(ctx, state.alias, progress=progress, on_pin=on_pin, **renew_options)
+            results.append((renewed, None))
+        except PyCertError as exc:
+            results.append((state, str(exc)))
+            progress("renewal failed for %s: %s" % (state.alias, exc))
+    return results
 
 
 # ---------------------------------------------------------------------------

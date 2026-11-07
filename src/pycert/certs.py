@@ -43,6 +43,10 @@ PrivateKey = Union[
 ]
 PublicKey = Union[rsa.RSAPublicKey, ec.EllipticCurvePublicKey, ed25519.Ed25519PublicKey, ed448.Ed448PublicKey]
 
+MAX_CERTIFICATE_BYTES = 1024 * 1024
+MAX_BUNDLE_BYTES = 4 * 1024 * 1024
+MAX_CERTIFICATES = 200
+
 HASH_ALGORITHMS = {
     "sha256": hashes.SHA256,
     "sha384": hashes.SHA384,
@@ -65,6 +69,8 @@ def hash_algorithm(name: str) -> hashes.HashAlgorithm:
 
 
 def load_private_key(data: bytes, password: "bytes | str | None" = None) -> PrivateKey:
+    if len(data) > MAX_CERTIFICATE_BYTES:
+        raise CryptoError("private key file is larger than 1 MiB")
     if isinstance(password, str):
         password = password.encode()
     try:
@@ -102,6 +108,8 @@ def _quietly(func, *args, **kwargs):
 
 def load_certificate(data: bytes) -> x509.Certificate:
     """Load exactly one certificate from PEM or DER."""
+    if len(data) > MAX_CERTIFICATE_BYTES:
+        raise CryptoError("certificate data is larger than 1 MiB")
     try:
         if b"-----BEGIN" in data:
             certs = _quietly(load_pem_certificates, data)
@@ -122,6 +130,8 @@ def load_certificates(data: bytes) -> "list[x509.Certificate]":
     """
     if not data or not data.strip():
         raise CryptoError("empty certificate data")
+    if len(data) > MAX_BUNDLE_BYTES:
+        raise CryptoError("certificate bundle is larger than 4 MiB")
     candidates: "list[list[x509.Certificate]]" = []
     if b"-----BEGIN" in data:
         errors = []
@@ -153,6 +163,8 @@ def load_certificates(data: bytes) -> "list[x509.Certificate]":
                 result.append(cert)
     if not result:
         raise CryptoError("no certificates found")
+    if len(result) > MAX_CERTIFICATES:
+        raise CryptoError("certificate bundle contains more than %d certificates" % MAX_CERTIFICATES)
     return result
 
 
@@ -216,6 +228,15 @@ def key_fingerprint(key: PublicKey) -> str:
     import hashlib
 
     return hashlib.sha256(spki_der(key)).hexdigest()
+
+
+def key_strength_warning(key: PublicKey) -> "str | None":
+    """Return a warning for keys below current policy, otherwise None."""
+    if isinstance(key, rsa.RSAPublicKey) and key.key_size < 2048:
+        return "RSA key is only %d bits (minimum policy is 2048)" % key.key_size
+    if isinstance(key, ec.EllipticCurvePublicKey) and key.curve.key_size < 256:
+        return "EC key is only %d bits (minimum policy is 256)" % key.curve.key_size
+    return None
 
 
 def key_description(key: PublicKey) -> str:

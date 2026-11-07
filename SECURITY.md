@@ -148,7 +148,13 @@ someone who can read your home directory (backups, sync clients, root). Use
   leave a partially written key and there is no window in which the file is
   world-readable.
 * permissions of existing files are checked, and `pycert list` audits the whole
-  data directory, reporting anything group/other-accessible.
+  data directory, reporting anything group/other-accessible or symlinked;
+* secret files are updated under an advisory lock (threads and processes), and
+  the secret store refuses symlinked secret files and symlinked lock files;
+* atomic writes `fsync` the file and then the parent directory, so a crash or
+  power loss cannot lose a completed rename;
+* TOML, XML, PEM, certificate, state and PKCS#12 inputs all have hard size,
+  depth and count limits (see docs/CONFIGURATION.md).
 * backups: a renewal moves the old key, certificate and `.p12` into
   `previous/<timestamp>/` with the same 0600/0700 permissions. Deleting a request
   removes the directory recursively; nothing is copied elsewhere.
