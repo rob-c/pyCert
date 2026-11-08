@@ -813,3 +813,424 @@ python3 -m sandbox_ca --data-dir .sandbox-ca --port 8443 \
 The sandbox is deliberately small enough to review, but it demonstrates the
 protocol, the CA mapping and the certbot/nginx path. It is the starting point
 for a production design, not the production design itself.
+
+---
+
+# Part II — STFC implementation blueprint
+
+This part turns the architectural case into an executable programme. It is
+written for the people who will actually deliver, assure, operate and migrate
+the service. It is deliberately opinionated; change the decisions through the
+ADR process if STFC chooses a different route.
+
+## 17. Work breakdown and delivery sequence
+
+### 17.1 Workstreams
+
+| Workstream | Owner | Outcome |
+|---|---|---|
+| WS1 Policy and assurance | CA manager + assurance | Updated CP/CPS, Subscriber Agreement, profile and EAB policy |
+| WS2 ACME service | Platform/service owner | RFC 8555 endpoint with directory, accounts, orders, challenges, finalize, cert, revoke |
+| WS3 CA integration | CA operations | Durable CSR/approval/signing adapter and certificate lookup/download |
+| WS4 Identity and EAB | Security/identity | Institutional account onboarding, key custody, rotation and revocation |
+| WS5 Operations | SRE/operations | HA, monitoring, backup, DR, runbooks, on-call |
+| WS6 Clients and migration | Service owners | certbot/nginx/cert-manager integration and cohort migration |
+| WS7 Security and conformance | Security + test | Threat model, pen test, interop and conformance gates |
+| WS8 Documentation and training | Service owner | Staff guides, FAQ, training, support model |
+
+### 17.2 Epics and acceptance criteria
+
+| Epic | Scope | Acceptance |
+|---|---|---|
+| E1 Directory and nonce | `/directory`, `/new-nonce`, nonce store | RFC shape; single-use nonce; expiry; HA-safe |
+| E2 Accounts and EAB | JWK/JWS, account lifecycle, EAB | New/existing account; EAB HMAC; deactivation; audit |
+| E3 Orders | identifiers, authz, challenges, state machine | DNS/IP identifiers; pending→ready→processing→valid/invalid |
+| E4 Challenges | HTTP-01, DNS-01, TLS-ALPN-01 where in scope | Positive/negative tests; SSRF/DNS-rebinding controls |
+| E5 Finalize and certificate | CSR validation, CA adapter, PEM chain | SAN equality; CA signing; account ownership; idempotency |
+| E6 Revocation and publication | revoke-cert, CRL/OCSP | Authorized revocation; freshness SLO; audit |
+| E7 Durability | database, nonce store, restart/failover | RPO/RTO met; no nonce reuse; order recovery |
+| E8 Operations | metrics, logs, alerts, DR, capacity | Dashboards; runbooks; load/DR tests |
+| E9 Client enablement | certbot/acme.sh/cert-manager/nginx | Documented, tested, supported matrix |
+| E10 Migration | inventory, pilots, cohorts, decommission | All host/TLS certs migrated or exceptioned |
+
+### 17.3 Indicative sequence
+
+```text
+Phase 0  Policy, inventory, EAB model, endpoint/trust decision
+Phase 1  ACME core + CA adapter + certbot/nginx pilot
+Phase 2  HA database, HSM, EAB onboarding, monitoring, security review
+Phase 3  Cohort migration, training, dual-run legacy + ACME
+Phase 4  ARI/short lifetimes, native consolidation, retire desktop dependency
+```
+
+Do not start Phase 3 before the Phase 1 client matrix and the Phase 2 security
+and durability gates pass.
+
+## 18. Reference service architecture
+
+```
+                       Internet / campus network
+                                  |
+                         TLS ingress / WAF
+                                  |
+                 +----------------v----------------+
+                 |  ACME API (stateless)           |
+                 |  JWS, nonce consume, policy     |
+                 +------+------------------+-------+
+                        |                  |
+             +----------v----+     +-------v--------+
+             |  ACME state DB |     | nonce store    |
+             |  accounts      |     | (Redis/DB)     |
+             |  orders/authz  |     +----------------+
+             |  challenges    |
+             +----------+-----+
+                        |
+             +----------v------------------+
+             |  CA adapter / signing queue |
+             |  CSR, approval, status      |
+             +----------+------------------+
+                        |
+             +----------v------------------+
+             |  CA core + HSM             |
+             +----------+------------------+
+                        |
+             +----------v------------------+
+             | CRL/OCSP publisher         |
+             +-----------------------------+
+```
+
+### 18.1 Component responsibilities
+
+- **Ingress:** TLS termination, request limits, WAF/rate limits, access logs.
+- **ACME API:** stateless workers; all state in DB; no account/order state on
+  local disk.
+- **Nonce store:** atomic consume, short TTL, HA; never reuse a nonce.
+- **State DB:** transactional account/order/authz/challenge/cert mapping.
+- **CA adapter:** the only component allowed to submit CSR/approval/signing
+  requests; least-privilege service identity.
+- **CA core/HSM:** existing signing custody; no public exposure.
+- **Publisher:** CRL/OCSP/ARI metadata; monitored freshness.
+
+### 18.2 Availability model
+
+- At least two ACME API instances behind a load balancer.
+- Shared nonce store and database; no sticky-session dependency.
+- CA signing is an asynchronous or short-RPC dependency; ACME returns
+  `processing` if signing is not immediate.
+- Backpressure: bounded queues, explicit 503/`serverInternal` with retry
+  guidance, not unbounded memory.
+- Rolling upgrades preserve nonce and order state.
+
+## 19. Data model (production-ready)
+
+Use PostgreSQL (or an equivalent transactional DB) rather than local JSON.
+The reference sandbox uses JSON only for reviewability.
+
+```sql
+CREATE TABLE acme_accounts (
+    id              text PRIMARY KEY,
+    jwk             jsonb NOT NULL,
+    thumbprint      text NOT NULL UNIQUE,
+    contact         jsonb NOT NULL DEFAULT '[]',
+    status          text NOT NULL DEFAULT 'valid', -- valid|deactivated|revoked
+    eab_kid         text,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    deactivated_at  timestamptz
+);
+
+CREATE TABLE acme_orders (
+    id              text PRIMARY KEY,
+    account_id      text NOT NULL REFERENCES acme_accounts(id),
+    status          text NOT NULL,
+    identifiers     jsonb NOT NULL,
+    expires_at      timestamptz NOT NULL,
+    certificate_id  bigint,
+    error           jsonb,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE acme_authorizations (
+    id              text PRIMARY KEY,
+    order_id        text NOT NULL REFERENCES acme_orders(id) ON DELETE CASCADE,
+    identifier      jsonb NOT NULL,
+    wildcard        boolean NOT NULL DEFAULT false,
+    status          text NOT NULL,
+    expires_at      timestamptz NOT NULL
+);
+
+CREATE TABLE acme_challenges (
+    id              text PRIMARY KEY,
+    authz_id        text NOT NULL REFERENCES acme_authorizations(id) ON DELETE CASCADE,
+    type            text NOT NULL,
+    token           text NOT NULL,
+    status          text NOT NULL,
+    validated_at    timestamptz,
+    error           jsonb
+);
+
+CREATE TABLE acme_nonces (
+    nonce_hash      bytea PRIMARY KEY,
+    expires_at      timestamptz NOT NULL,
+    used_at         timestamptz
+);
+
+CREATE TABLE acme_certificates (
+    id              bigint PRIMARY KEY,
+    account_id      text NOT NULL REFERENCES acme_accounts(id),
+    order_id        text NOT NULL REFERENCES acme_orders(id),
+    serial          numeric NOT NULL,
+    status          text NOT NULL,
+    issued_at       timestamptz NOT NULL,
+    revoked_at      timestamptz
+);
+
+CREATE TABLE acme_audit (
+    event_id        bigserial PRIMARY KEY,
+    occurred_at     timestamptz NOT NULL DEFAULT now(),
+    account_id      text,
+    order_id        text,
+    certificate_id  bigint,
+    action          text NOT NULL,
+    source_ip       inet,
+    result          text NOT NULL,
+    detail          jsonb
+);
+
+CREATE INDEX ON acme_orders(account_id, created_at);
+CREATE INDEX ON acme_authorizations(order_id);
+CREATE INDEX ON acme_challenges(authz_id);
+CREATE INDEX ON acme_certificates(account_id);
+CREATE INDEX ON acme_nonces(expires_at);
+```
+
+Nonces may live in Redis with `SET NX`/Lua compare-and-delete semantics. The
+database rows must be the source of truth for issuance and audit.
+
+## 20. EAB onboarding and account lifecycle
+
+EAB binds an ACME account key to an institution. It is not a password and must
+not be emailed in clear text.
+
+### 20.1 Onboarding flow
+
+1. Service owner requests ACME access with service name, owner, hostnames,
+   environment and certificate profile.
+2. RA/security validates the request against policy (host ownership, IGTF
+   applicability, data classification).
+3. CA operator creates an EAB credential (`kid` + random HMAC key) and records
+   the mapping in the account register.
+4. Secret is delivered through an approved secret channel (vault/one-time
+   link), not a ticket comment.
+5. Client registers with `--eab-kid`/`--eab-hmac-key`; the server records the
+   EAB kid against the account.
+6. Rotation: issue a new EAB kid/key, re-register or create a new account,
+   revoke the old account, update automation, record dates.
+7. Offboarding: deactivate account, revoke certificates if required, remove
+   DNS/challenge access and archive audit records.
+
+### 20.2 Account policy
+
+- One account per service/team, not one per host, unless isolation requires it.
+- Account key material is generated on the client and stored in the platform
+  secret store; it is never sent to the CA.
+- EAB keys are scoped to an environment (test/staging/prod).
+- Account deactivation is a first-class operation and must be auditable.
+- Alert on account creation for protected domains and on unexpected EAB kids.
+
+## 21. Certificate profile matrix
+
+| Profile | Use | Key | Validity | SANs | EKU | Publication |
+|---|---|---|---|---|---|---|
+| `tls-server` | Public/campus HTTPS | RSA ≥2048 or P-256 | 90 days pilot | exact order DNS names | serverAuth | CRL + OCSP/AIA |
+| `tls-server-wildcard` | Wildcard HTTPS | RSA ≥2048 or P-256 | 90 days | `*.example` | serverAuth | CRL + OCSP |
+| `internal-service` | Internal mTLS/API | RSA/EC | 90 days | DNS/IP as approved | serverAuth + clientAuth | CRL |
+| `user-identity` | Human grid identity | existing CA policy | existing | email/DN | clientAuth/emailProtection | existing; **not initial ACME scope** |
+| `host-grid` | Grid host cert | existing IGTF | existing policy | DNS | serverAuth/clientAuth per IGTF | existing |
+
+Do not silently widen SANs, EKUs or lifetimes in the name of automation. The
+ACME order must be constrained by an authorisation policy, not merely by the
+CSR the client sends.
+
+## 22. Capacity and service levels
+
+### 22.1 Planning assumptions (replace with measured STFC data)
+
+- 10,000 active host certificates, 90-day lifetime → ~111 renewals/day average;
+  plan for 10× burst during incidents or coordinated renewals.
+- 100 new orders/minute peak for a 30-minute window.
+- 5–20 API requests per order (challenge/poll/finalize/download).
+- Nonce traffic can be several times order traffic; size the nonce store
+  accordingly.
+
+### 22.2 Suggested SLOs for the pilot
+
+| SLO | Target |
+|---|---|
+| Directory/API availability | 99.9% monthly (pilot may be lower) |
+| p95 new-order latency | < 500 ms excluding CA signing |
+| p95 finalize-to-certificate | < 30 s in auto mode; < 2 business days manual |
+| Certificate download availability | 99.9% |
+| CRL freshness | within published CRL interval |
+| RPO for ACME state | ≤ 5 minutes |
+| RTO for ACME API | ≤ 30 minutes |
+| Audit log delivery | ≥ 99.9%, retained per policy |
+
+Measure and publish queue age for manual approval; it is the usual source of
+“ACME is broken” reports.
+
+## 23. Security control mapping
+
+| Control area | Implementation | Evidence |
+|---|---|---|
+| Governance | CP/CPS, RACI, change board | approved documents |
+| Asset management | account/order/cert register | DB + audit |
+| Access control | EAB, service identities, least privilege | IAM logs |
+| Cryptography | HSM, algorithm allowlist, key rotation | HSM audit, config |
+| Logging/monitoring | structured logs, SIEM, alerts | dashboards, retention |
+| Incident response | runbooks, revocation, CA compromise plan | exercises |
+| Supplier/HSM | procurement, firmware, dual control | vendor assurance |
+| Secure development | code review, dependency scanning, fuzzing | CI records |
+| Network | egress controls, WAF, private-IP blocks | firewall/proxy config |
+| Privacy | contact data minimisation, retention | privacy notice |
+
+Map these to NCSC CAF, ISO/IEC 27001 Annex A and IGTF requirements in the
+assurance artefacts; the table is an index, not a substitute for the mapping.
+
+## 24. Operational runbooks
+
+### 24.1 ACME API returning 5xx
+
+1. Confirm database and nonce-store health.
+2. Check CA adapter health and signing queue.
+3. Stop retries at the ingress if the fault is persistent; return a clear
+   problem document and preserve nonce/order state.
+4. Fail over to a healthy worker; do not delete state.
+5. Communicate with client owners; publish an incident note.
+
+### 24.2 Signing queue backed up
+
+1. Check HSM/CA availability and operator approval backlog.
+2. Increase manual signing capacity or enable the approved auto-sign policy.
+3. Orders remain `processing`; clients must poll, not resubmit blindly.
+4. Alert if queue age exceeds the SLO.
+
+### 24.3 Suspected account compromise
+
+1. Deactivate the ACME account and revoke its certificates per policy.
+2. Rotate/revoke EAB credentials.
+3. Preserve audit logs and source IPs.
+4. Notify security and certificate owners; follow the CP/CPS incident plan.
+
+### 24.4 CRL/OCSP delay
+
+1. Check publisher health and signing key access.
+2. Publish the previous valid CRL until a new one is signed; never serve an
+   unsigned/stale artefact without an explicit incident decision.
+3. Notify relying parties and record the deviation.
+
+### 24.5 Nonce store outage
+
+1. Fail closed for new POSTs; do not accept unverified/replayed nonces.
+2. Keep GET directory/terms available if safe.
+3. Restore the store; clients will retry with fresh nonces.
+4. Investigate whether any nonce was reused.
+
+## 25. Migration cohorts
+
+| Cohort | Scope | Prerequisites |
+|---|---|---|
+| Pilot | 3–5 services, non-critical hostnames | EAB, certbot/nginx guide, rollback |
+| Wave 1 | Low-risk internal HTTPS | monitoring, support desk, profile approval |
+| Wave 2 | Campus/public HTTPS | CAA/CRL/OCSP, load test, security review |
+| Wave 3 | High-value services | change board, DR exercise, per-service runbook |
+| Exception | user/identity certs or legacy-only clients | documented exception and owner |
+
+Track for every certificate: owner, hostnames, issuer, profile, expiry, ACME
+account/EAB kid, client/tool, renewal timer, last successful renewal and
+rollback contact.
+
+## 26. First 30 / 60 / 90 days
+
+### Days 0–30
+
+- appoint service owner and technical lead;
+- inventory CertWizard users/certificates;
+- decide ACME scope, EAB model and endpoint name;
+- stand up the reference sandbox and run certbot/nginx pilot;
+- draft CP/CPS changes and assurance questions.
+
+### Days 31–60
+
+- implement/deploy database, nonce store and EAB onboarding;
+- integrate CA adapter and HSM signing;
+- run certbot/acme.sh/cert-manager matrix;
+- complete threat model and SSRF/redirect tests;
+- publish pilot guide and support rota.
+
+### Days 61–90
+
+- security review and load/DR exercise;
+- onboard pilot cohort;
+- establish SLO dashboards and audit reports;
+- decide go/no-go for Wave 1;
+- publish legacy deprecation principles (not necessarily a date).
+
+## 27. RACI (minimum)
+
+| Activity | CA manager | Platform | Security | RA | Service owners |
+|---|---|---|---|---|---|
+| CP/CPS and profiles | A | C | C | C | I |
+| ACME service operation | A | R | C | I | I |
+| EAB issuance | A | C | C | R | I |
+| Certificate approval policy | A | I | C | R | C |
+| Client integration | I | C | I | I | R |
+| Incident/revocation | A | R | C | R | C |
+| Migration cohort | A | C | I | C | R |
+
+A = accountable, R = responsible, C = consulted, I = informed.
+
+## 28. Decision log (ADRs)
+
+| ADR | Decision | Rationale |
+|---|---|---|
+| ADR-001 | ACME façade before native CA rewrite | lowest risk, fastest client value |
+| ADR-002 | Host/TLS certificates first; user certs remain RA/portal | preserves identity proofing |
+| ADR-003 | EAB required for production accounts | institutional authorization, not open enrollment |
+| ADR-004 | Durable DB + shared nonce store, not local files | HA and replay safety |
+| ADR-005 | CA signing remains in HSM-backed CA core | custody and separation of duties |
+| ADR-006 | Private endpoint certificate for internal pilot; public/IGTF endpoint for production | client trust practicality |
+| ADR-007 | ARI after basic issuance | renewal-load benefits need stable issuance first |
+| ADR-008 | Keep legacy listener during migration | no flag-day break for CertWizard users |
+
+## 29. Procurement / vendor questions
+
+- Does the ACME server support RFC 8555, EAB and ARI? Which versions?
+- Where are account/order/nonce keys stored; can they use our HSM/KMS?
+- What is the HA topology and RPO/RTO?
+- How are nonces consumed atomically across regions?
+- What challenge types and SSRF controls are implemented?
+- How are CRL/OCSP/CT published and monitored?
+- What audit fields and retention are available?
+- Can it issue IGTF/classic/MICS profiles?
+- What is the upgrade/rollback and vulnerability response process?
+- Is source available for review, or is there an escrow/exit plan?
+
+## 30. Final recommendation
+
+STFC does not need to choose between “keep CertWizard forever” and “replace the
+CA in a big bang”. The low-risk path is:
+
+1. publish the policy and stop pretending the desktop client is the only
+   supported interface;
+2. put a governed ACME façade in front of the existing CA;
+3. require EAB and keep RA policy authoritative;
+4. run certbot/nginx on a pilot, then migrate host certificates by cohort;
+5. harden durability, HSM, monitoring, CRL/OCSP and ARI before declaring the
+   service production;
+6. keep the legacy endpoints until every user has a migration path.
+
+The reference implementation and 7,196-test evidence in this repository are a
+starting point, not a production certificate authority. The next step is an
+STFC-owned service design with named owners, an approved policy and a funded
+operations model.
