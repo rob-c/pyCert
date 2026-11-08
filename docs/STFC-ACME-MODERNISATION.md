@@ -46,8 +46,8 @@ This dossier sets out:
    certificate policy;
 4. the security, assurance, operations and audit work that must accompany it;
 5. an incremental migration plan that does not break CertWizard users;
-6. the test evidence already in this repository (6,196 tests at the time of
-   writing, including 2,000+ ACME/CA-emulation cases and a real certbot test);
+6. the test evidence already in this repository (7,196 tests at the time of
+   writing, including 3,000+ ACME/CA-emulation cases and a real certbot test);
 7. concrete certbot/nginx configurations that can be used for a pilot.
 
 The blunt recommendation: **stop making certificate automation require a
@@ -274,8 +274,9 @@ listener emulation matrix is `tests/test_ca_server_matrix.py`.
 | A1–A6 | `tests/test_acme_emulation.py`, `tests/test_acme_deep_matrix.py` |
 | A7–A11 | `tests/test_acme_matrix.py`, `tests/test_acme_deep_matrix.py` |
 | A12–A16 | `tests/test_acme_emulation.py` (bad CSR, orderNotReady, revocation) |
-| A18 (durability) | roadmap; sandbox persists CA records but ACME state is in-memory |
-| A19–A20 (production) | roadmap/assurance gate; not claimed by the sandbox |
+| A18 (durability) | `tests/test_acme_eab_persistence.py`; sandbox persists ACME state to `acme-state.json` |
+| A19 (EAB) | `tests/test_acme_eab_persistence.py`; production still needs institutional onboarding/assurance |
+| A20 (production) | roadmap/assurance gate; not claimed by the sandbox |
 
 The matrix is evidence for the reference behaviour, not a substitute for a
 production conformance programme. A production service must still run the
@@ -306,8 +307,10 @@ independent RFC/client/security gates in section 10.2.
 | A19 | EAB is supported for institutional account authorization | SHOULD (production MUST) |
 | A20 | ARI, CAA checks, rate limits, audit and metrics are production requirements | SHOULD/PRODUCTION MUST |
 
-The reference implementation in `sandbox_ca/acme.py` implements A1–A16, plus
-ARI is a documented roadmap item rather than a sandbox feature. Test evidence:
+The reference implementation in `sandbox_ca/acme.py` implements A1–A19, plus
+ARI is a documented roadmap item rather than a sandbox feature. Production
+hardening still requires durable HA storage, HSM-backed signing, rate limits,
+CAA, CRL/OCSP, monitoring and independent conformance testing. Test evidence:
 `tests/test_acme_emulation.py`, `tests/test_acme_matrix.py`,
 `tests/test_acme_deep_matrix.py` and `tests/test_acme_certbot.py`.
 
@@ -414,10 +417,12 @@ ACME clients expect revocation to be meaningful. At minimum:
 
 ### 6.3 What the sandbox deliberately does not prove
 
-The sandbox uses a test CA, auto-validation and in-memory ACME state. It is
-excellent for protocol and interoperability testing; it is **not** a production
-security boundary. Production still needs HSM-backed signing, durable ACME
-state, EAB, rate limits, CAA, OCSP/CRL, monitoring and a security review.
+The sandbox uses a test CA and auto-validation. It now persists
+accounts/orders/challenges in `acme-state.json` and supports EAB, but that is
+still local JSON, not a production HA database. It is excellent for protocol
+and interoperability testing; it is **not** a production security boundary.
+Production still needs HSM-backed signing, durable HA state, rate limits, CAA,
+OCSP/CRL, monitoring and a security review.
 
 ---
 
@@ -622,8 +627,8 @@ unchanged during the ACME rollout.
 
 ### 10.1 Current evidence in this repository
 
-- **6,196 tests** in the full suite.
-- **2,000+ ACME/CA-emulation cases**, including:
+- **7,196 tests** in the full suite.
+- **3,000+ ACME/CA-emulation cases**, including:
   - routing/method matrix;
   - JWS envelope and algorithm rejection;
   - DNS identifier validation;
@@ -632,7 +637,8 @@ unchanged during the ACME rollout.
   - HTTP-01 body/path validation;
   - nonce lifecycle and concurrency;
   - problem documents;
-  - CA manual signing and wildcard orders.
+  - CA manual signing and wildcard orders;
+  - EAB HMAC/account-key binding and ACME-state restart/persistence.
 - **1,000 legacy-listener cases** in `tests/test_ca_server_matrix.py`:
   - CSR XML/PIN/email/version validation;
   - PPPK host, renewal and revocation challenges;

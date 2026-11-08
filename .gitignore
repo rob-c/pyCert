@@ -18,3 +18,4 @@ secrets.json
 .sandbox-ca/
 sandbox.json
 state.json
+acme-state.json

@@ -12,14 +12,18 @@ token, and ``manual`` leaves the challenge pending for an operator.
 
 import base64
 import hashlib
+import hmac
 import json
+import os
 import re
 import secrets
 import socket
 import ssl
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -86,6 +90,7 @@ class Account:
     status: str = "valid"
     created_at: "str" = ""
     kid: str = ""
+    eab_kid: str = ""
 
 
 @dataclass
@@ -294,6 +299,9 @@ class ACMEServer:
         challenge_mode: str = "auto",
         http_port: int = 80,
         auto_validate: "bool | None" = None,
+        eab_credentials: "dict[str, str] | None" = None,
+        require_eab: "bool | None" = None,
+        state_path: "str | Path | None" = None,
     ):
         self.ca = ca
         self.backend = SandboxBackend(ca)
@@ -302,6 +310,18 @@ class ACMEServer:
         self.challenge_mode = challenge_mode
         self.http_port = int(http_port)
         self.auto_validate = (challenge_mode == "auto") if auto_validate is None else bool(auto_validate)
+        self.eab_credentials = {}
+        for kid, key in (eab_credentials or {}).items():
+            if isinstance(key, str):
+                try:
+                    key = b64d(key)
+                except (ValueError, TypeError) as exc:
+                    raise ValueError("invalid EAB HMAC key for %r: %s" % (kid, exc))
+            if not key:
+                raise ValueError("empty EAB HMAC key for %r" % kid)
+            self.eab_credentials[str(kid)] = bytes(key)
+        self.require_eab = bool(self.eab_credentials) if require_eab is None else bool(require_eab)
+        self.state_path = Path(state_path).expanduser() if state_path is not None else None
         self.lock = threading.RLock()
         self.accounts: "dict[str, Account]" = {}
         self.accounts_by_thumbprint: "dict[str, str]" = {}
@@ -316,6 +336,154 @@ class ACMEServer:
         self._hostname = ca.hostname if hasattr(ca, "hostname") else host
         self._public_url = (public_url or "https://%s:%d" % (self._hostname, port)).rstrip("/")
         self.nonce_counter = 0
+        self._load_state()
+
+    # -- persisted ACME state ---------------------------------------------
+    STATE_FORMAT = 1
+
+    def _load_state(self) -> None:
+        if self.state_path is None or not self.state_path.exists():
+            return
+        try:
+            data = json.loads(self.state_path.read_text())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("cannot read ACME state %s: %s" % (self.state_path, exc))
+        if not isinstance(data, dict) or data.get("format") not in (None, 1):
+            raise RuntimeError("unsupported ACME state format in %s" % self.state_path)
+        with self.lock:
+            self.accounts = {}
+            self.accounts_by_thumbprint = {}
+            for item in data.get("accounts") or []:
+                account = Account(
+                    id=str(item["id"]),
+                    jwk=item["jwk"],
+                    thumbprint=str(item["thumbprint"]),
+                    contact=list(item.get("contact") or []),
+                    status=str(item.get("status") or "valid"),
+                    created_at=str(item.get("created_at") or ""),
+                    kid=str(item["kid"]),
+                    eab_kid=str(item.get("eab_kid") or ""),
+                )
+                self.accounts[account.id] = account
+                self.accounts_by_thumbprint[account.thumbprint] = account.id
+            self.orders = {}
+            for item in data.get("orders") or []:
+                self.orders[str(item["id"])] = Order(
+                    id=str(item["id"]),
+                    account_id=str(item["account_id"]),
+                    identifiers=list(item.get("identifiers") or []),
+                    status=str(item.get("status") or "pending"),
+                    expires=str(item.get("expires") or ""),
+                    authorizations=list(item.get("authorizations") or []),
+                    finalize=str(item.get("finalize") or ""),
+                    certificate=str(item.get("certificate") or ""),
+                    backend_spki=str(item.get("backend_spki") or ""),
+                    backend_id=item.get("backend_id"),
+                    error=item.get("error"),
+                    created_at=str(item.get("created_at") or ""),
+                )
+            self.authzs = {}
+            for item in data.get("authzs") or []:
+                self.authzs[str(item["id"])] = Authorization(
+                    id=str(item["id"]),
+                    order_id=str(item["order_id"]),
+                    identifier=dict(item["identifier"]),
+                    wildcard=bool(item.get("wildcard")),
+                    status=str(item.get("status") or "pending"),
+                    expires=str(item.get("expires") or ""),
+                    challenges=list(item.get("challenges") or []),
+                )
+            self.challenges = {}
+            for item in data.get("challenges") or []:
+                self.challenges[str(item["id"])] = Challenge(
+                    id=str(item["id"]),
+                    authz_id=str(item["authz_id"]),
+                    type=str(item["type"]),
+                    token=str(item["token"]),
+                    status=str(item.get("status") or "pending"),
+                    validated=item.get("validated"),
+                    error=item.get("error"),
+                )
+            self.cert_orders = {int(key): str(value) for key, value in (data.get("cert_orders") or {}).items()}
+
+    def _persist_state(self) -> None:
+        if self.state_path is None:
+            return
+        with self.lock:
+            data = {
+                "format": self.STATE_FORMAT,
+                "accounts": [
+                    {
+                        "id": account.id,
+                        "jwk": account.jwk,
+                        "thumbprint": account.thumbprint,
+                        "contact": account.contact,
+                        "status": account.status,
+                        "created_at": account.created_at,
+                        "kid": account.kid,
+                        "eab_kid": account.eab_kid,
+                    }
+                    for account in self.accounts.values()
+                ],
+                "orders": [
+                    {
+                        "id": order.id,
+                        "account_id": order.account_id,
+                        "identifiers": order.identifiers,
+                        "status": order.status,
+                        "expires": order.expires,
+                        "authorizations": order.authorizations,
+                        "finalize": order.finalize,
+                        "certificate": order.certificate,
+                        "backend_spki": order.backend_spki,
+                        "backend_id": order.backend_id,
+                        "error": order.error,
+                        "created_at": order.created_at,
+                    }
+                    for order in self.orders.values()
+                ],
+                "authzs": [
+                    {
+                        "id": authz.id,
+                        "order_id": authz.order_id,
+                        "identifier": authz.identifier,
+                        "wildcard": authz.wildcard,
+                        "status": authz.status,
+                        "expires": authz.expires,
+                        "challenges": authz.challenges,
+                    }
+                    for authz in self.authzs.values()
+                ],
+                "challenges": [
+                    {
+                        "id": challenge.id,
+                        "authz_id": challenge.authz_id,
+                        "type": challenge.type,
+                        "token": challenge.token,
+                        "status": challenge.status,
+                        "validated": challenge.validated,
+                        "error": challenge.error,
+                    }
+                    for challenge in self.challenges.values()
+                ],
+                "cert_orders": {str(key): value for key, value in self.cert_orders.items()},
+            }
+            text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=".acme-state.", dir=str(self.state_path.parent))
+            try:
+                with os.fdopen(fd, "w") as handle:
+                    handle.write(text)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                try:
+                    os.chmod(temporary, 0o600)
+                except OSError:
+                    pass
+                os.replace(temporary, str(self.state_path))
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
 
     # -- URLs --------------------------------------------------------------
     @property
@@ -360,7 +528,7 @@ class ACMEServer:
                 "termsOfService": base + "/acme/terms",
                 "website": base,
                 "caaIdentities": ["sandbox.invalid"],
-                "externalAccountRequired": False,
+                "externalAccountRequired": bool(self.require_eab),
             },
         }
 
@@ -408,6 +576,47 @@ class ACMEServer:
             raise ACMEProblem("malformed", "JWS payload must be a JSON object")
         return account, payload, jwk
 
+    # -- external account binding -----------------------------------------
+    def _verify_eab(self, jwk: dict, payload: dict) -> str:
+        binding = payload.get("externalAccountBinding")
+        if binding is None:
+            if self.require_eab:
+                raise ACMEProblem(
+                    "externalAccountRequired",
+                    "this ACME server requires an externalAccountBinding",
+                )
+            return ""
+        if not isinstance(binding, dict):
+            raise ACMEProblem("malformed", "externalAccountBinding must be an object")
+        try:
+            protected = _safe_json(b64d(binding["protected"]))
+            payload_b64 = binding["payload"]
+            protected_b64 = binding["protected"]
+            signature = b64d(binding["signature"])
+            eab_payload = _safe_json(b64d(payload_b64))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ACMEProblem("malformed", "invalid externalAccountBinding: %s" % exc)
+        if not isinstance(protected, dict):
+            raise ACMEProblem("malformed", "EAB protected header must be an object")
+        if protected.get("alg") not in ("HS256", "HS384", "HS512"):
+            raise ACMEProblem("badSignatureAlgorithm", "EAB must use HS256/384/512")
+        if protected.get("url") != self.url("/acme/new-account"):
+            raise ACMEProblem("unauthorized", "EAB protected URL does not match new-account", 403)
+        kid = str(protected.get("kid") or "")
+        key = self.eab_credentials.get(kid)
+        if key is None:
+            raise ACMEProblem("unauthorized", "unknown EAB kid", 403)
+        alg = protected["alg"]
+        digest = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}[alg]
+        expected = hmac.new(key, (protected_b64 + "." + payload_b64).encode("ascii"), digest).digest()
+        if not hmac.compare_digest(expected, signature):
+            raise ACMEProblem("unauthorized", "EAB HMAC verification failed", 403)
+        if not isinstance(eab_payload, dict):
+            raise ACMEProblem("badPublicKey", "EAB payload must be a JWK object")
+        if jwk_thumbprint(eab_payload) != jwk_thumbprint(jwk):
+            raise ACMEProblem("unauthorized", "EAB payload does not match the account key", 403)
+        return kid
+
     # -- account -----------------------------------------------------------
     def _account_object(self, account: Account) -> dict:
         return {
@@ -421,6 +630,7 @@ class ACMEServer:
         account, payload, jwk = self._jws(body, expected_url)
         if account is not None:
             raise ACMEProblem("malformed", "new-account must use a jwk, not a kid")
+        eab_kid = self._verify_eab(jwk, payload)
         thumbprint = jwk_thumbprint(jwk)
         with self.lock:
             existing_id = self.accounts_by_thumbprint.get(thumbprint)
@@ -441,9 +651,11 @@ class ACMEServer:
                 contact=list(contact),
                 created_at=created,
                 kid=self.url("/acme/acct/" + account_id),
+                eab_kid=eab_kid,
             )
             self.accounts[account_id] = account
             self.accounts_by_thumbprint[thumbprint] = account_id
+            self._persist_state()
         return {"status": 201, "location": account.kid, "body": self._account_object(account)}
 
     # -- orders ------------------------------------------------------------
@@ -500,6 +712,7 @@ class ACMEServer:
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             )
             self.orders[order_id] = order
+            self._persist_state()
         return {"status": 201, "location": self.url("/acme/order/" + order_id), "body": self._order_object(order)}
 
     # -- object rendering --------------------------------------------------
@@ -549,6 +762,7 @@ class ACMEServer:
         if any(authz.status == "invalid" for authz in authzs):
             order.status = "invalid"
             order.error = {"type": "urn:ietf:params:acme:error:unauthorized", "detail": "an authorization failed"}
+            self._persist_state()
             return
         if order.status == "processing":
             record = self.backend.certificate(order.backend_spki) if order.backend_spki else None
@@ -557,9 +771,11 @@ class ACMEServer:
                 order.backend_id = record.id
                 order.certificate = self.url("/acme/cert/" + str(record.id))
                 self.cert_orders[record.id] = order.id
+                self._persist_state()
             return
         if all(authz.status == "valid" for authz in authzs):
             order.status = "ready"
+            self._persist_state()
 
     # -- authz / challenge -------------------------------------------------
     def _get_authz(self, authz_id: str, account: "Account | None") -> Authorization:
@@ -633,6 +849,7 @@ class ACMEServer:
             challenge.status = "invalid"
             challenge.error = {"type": "urn:ietf:params:acme:error:unauthorized", "detail": detail}
             self.authzs[challenge.authz_id].status = "invalid"
+        self._persist_state()
 
     # -- finalize / certificate --------------------------------------------
     def _csr_domains(self, csr: x509.CertificateSigningRequest) -> "list[str]":
@@ -684,6 +901,7 @@ class ACMEServer:
         except (ACMEProblem, PyCertError, ValueError) as exc:
             order.status = "invalid"
             order.error = {"type": "urn:ietf:params:acme:error:serverInternal", "detail": str(exc)}
+        self._persist_state()
         return {"status": 200, "body": self._order_object(order)}
 
     def _certificate(self, cert_id: int, account: "Account | None") -> bytes:
@@ -713,6 +931,7 @@ class ACMEServer:
         if record is None:
             raise ACMEProblem("malformed", "certificate is not known to this CA", 404)
         self.backend.revoke(record.id, int(payload.get("reason", 0)))
+        self._persist_state()
         return {"status": 200, "body": {}}
 
     # -- request handler ---------------------------------------------------

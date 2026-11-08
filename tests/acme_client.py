@@ -190,3 +190,18 @@ def complete_order(client: ACMEClient, domains, *, challenge_type=None):
     csr_der = client.csr(domains)
     status, headers, body = client.finalize(order["finalize"], csr_der)
     return status, headers, body
+
+
+def eab_binding(jwk, kid: str, key: bytes, url: str, *, alg: str = "HS256") -> dict:
+    """Build an RFC 8555 §7.3.4 externalAccountBinding object."""
+    import hashlib
+    import hmac
+
+    protected = {"alg": alg, "kid": kid, "url": url}
+    protected_b64 = b64e(json.dumps(protected, separators=(",", ":")).encode())
+    payload_b64 = b64e(json.dumps(jwk, separators=(",", ":")).encode())
+    digest = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}.get(
+        alg, hashlib.sha256
+    )
+    signature = hmac.new(key, (protected_b64 + "." + payload_b64).encode("ascii"), digest).digest()
+    return {"protected": protected_b64, "payload": payload_b64, "signature": b64e(signature)}

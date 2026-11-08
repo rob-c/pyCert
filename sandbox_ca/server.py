@@ -94,6 +94,8 @@ class SandboxCA(MockCA):
             + "/__sandbox__/ui"
             + (("?token=" + quote(self.admin_token, safe="")) if self.admin_token else ""),
             "acme_directory": self.acme.directory_url() if self.acme is not None else "",
+            "acme_state_file": str(self.data_dir_path / "acme-state.json"),
+            "acme_external_account_required": bool(self.acme and self.acme.require_eab),
             "started_at": self.started_at,
         }
 
@@ -237,6 +239,9 @@ class SandboxCA(MockCA):
         http_port: int = 80,
         public_url: "str | None" = None,
         auto_validate: "bool | None" = None,
+        eab_credentials: "dict[str, str] | None" = None,
+        require_eab: "bool | None" = None,
+        state_path: "str | Path | None" = None,
     ):
         """Start the RFC 8555 front-end on its own TLS listener.
 
@@ -254,6 +259,9 @@ class SandboxCA(MockCA):
             challenge_mode=challenge_mode,
             http_port=http_port,
             auto_validate=auto_validate,
+            eab_credentials=eab_credentials,
+            require_eab=require_eab,
+            state_path=state_path or (self.data_dir_path / "acme-state.json"),
         )
         self.acme.start()
         self.write_info()

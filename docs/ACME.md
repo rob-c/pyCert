@@ -215,11 +215,42 @@ After issuance, `nginx -s reload` reloads the certificate.  Browsers and
 clients will still warn about the private sandbox CA until its root is
 installed as trusted.
 
+## External Account Binding and persistence
+
+The front-end supports RFC 8555 §7.3.4 EAB. Start it with an institutional key
+identifier and base64url HMAC secret:
+
+```sh
+python3 -m sandbox_ca \
+  --data-dir .sandbox-ca \
+  --acme-port 14000 \
+  --acme-eab-kid stfc-test \
+  --acme-eab-hmac-key "$EAB_HMAC_KEY"
+```
+
+certbot then uses:
+
+```sh
+certbot certonly ... --eab-kid stfc-test --eab-hmac-key "$EAB_HMAC_KEY"
+```
+
+When EAB credentials are configured, the directory advertises
+`externalAccountRequired: true` and `new-account` without a valid binding is
+rejected. HS256/HS384/HS512 are supported; the EAB payload must be the account
+JWK.
+
+When started through `SandboxCA.start_acme()`, ACME accounts/orders/authzs/
+challenges/certificate mappings are written atomically to
+`<data-dir>/acme-state.json` (mode 0600) and restored on restart. Nonces are
+intentionally ephemeral. Restart on the same ACME port so the stored `kid`
+URLs remain valid. The direct `ACMEServer(..., state_path=...)` API has the
+same persistence behaviour.
+
 ## Limits
 
-- No external account binding (EAB), ARI, profiles, or key-change.
-- ACME accounts/orders/nonces are in memory; the CA hierarchy, CSR queue and
-  certificates are persisted by the sandbox's normal `state.json`.
+- No ARI, profiles, or key-change.
+- Nonces are in memory by design; accounts/orders/challenges are persisted when
+  a state path is configured.
 - `dns-01` only auto-validates in `auto` mode; there is no DNS provider hook.
 - No OCSP, CRL, CAA checking, or rate limiting.
 - Revocation removes the certificate's CA status; it does not publish a CRL.
@@ -232,6 +263,7 @@ installed as trusted.
 `sandbox_ca/server.py` starts it through `SandboxCA.start_acme()`.  The tests
 are split between `tests/test_acme_emulation.py` (lifecycle and edge cases),
 `tests/test_acme_matrix.py`, `tests/test_acme_deep_matrix.py` (large
-routing/JWS/CSR/HTTP-01 matrices) and `tests/test_acme_certbot.py` (optional
-real-certbot integration). The legacy listener has a separate 1,000-case
-matrix in `tests/test_ca_server_matrix.py`.
+routing/JWS/CSR/HTTP-01 matrices), `tests/test_acme_eab_persistence.py`
+(EAB, restart/durability and routing) and `tests/test_acme_certbot.py`
+(optional real-certbot integration). The legacy listener has a separate
+1,000-case matrix in `tests/test_ca_server_matrix.py`.

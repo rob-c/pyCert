@@ -61,7 +61,9 @@ python3 -m sandbox_ca --data-dir .sandbox-ca --acme-port 14000 --acme-challenge-
 Point certbot at the printed `https://localhost:14000/acme/directory` (use
 `--no-verify-ssl` locally, or trust `.sandbox-ca/root.pem`). The ACME front-end
 maps orders to the same CA CSR/sign/download/revoke state and supports
-`http-01`, `dns-01`, wildcard, auto and webroot validation. See
+`http-01`, `dns-01`, wildcard, auto and webroot validation. Use
+`--acme-eab-kid`/`--acme-eab-hmac-key` for external account binding; ACME
+accounts/orders are persisted in `<data-dir>/acme-state.json`. See
 [`docs/ACME.md`](../docs/ACME.md) for certbot and nginx examples, and
 [`docs/STFC-ACME-MODERNISATION.md`](../docs/STFC-ACME-MODERNISATION.md) for the
 wider STFC architecture/policy/migration dossier.

@@ -77,6 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--acme-public-url",
         help="public ACME base URL (for a reverse proxy; default https://<hostname>:<acme-port>)",
     )
+    parser.add_argument("--acme-eab-kid", help="require this EAB key identifier")
+    parser.add_argument(
+        "--acme-eab-hmac-key",
+        help="base64url HMAC key for --acme-eab-kid (required with EAB)",
+    )
+    parser.add_argument(
+        "--acme-require-eab",
+        action="store_true",
+        help="require external account binding even if credentials are supplied implicitly",
+    )
     return parser
 
 
@@ -87,6 +97,12 @@ def main(argv=None) -> int:
         return 2
     if args.sign_after_polls < 0:
         print("sandbox: --sign-after-polls must be >= 0", file=sys.stderr)
+        return 2
+    if bool(args.acme_eab_kid) != bool(args.acme_eab_hmac_key):
+        print("sandbox: --acme-eab-kid and --acme-eab-hmac-key must be supplied together", file=sys.stderr)
+        return 2
+    if args.acme_require_eab and not args.acme_eab_kid:
+        print("sandbox: --acme-require-eab needs EAB credentials", file=sys.stderr)
         return 2
     if args.host in ("0.0.0.0", "::") and not args.public_host:
         print(
@@ -117,6 +133,12 @@ def main(argv=None) -> int:
                 challenge_mode=args.acme_challenge_mode,
                 http_port=args.acme_http_port,
                 public_url=args.acme_public_url,
+                eab_credentials=(
+                    {args.acme_eab_kid: args.acme_eab_hmac_key}
+                    if args.acme_eab_kid and args.acme_eab_hmac_key
+                    else None
+                ),
+                require_eab=True if args.acme_require_eab else None,
             )
         except Exception as exc:  # noqa: BLE001
             print("sandbox: could not start ACME front-end: %s" % exc, file=sys.stderr)
