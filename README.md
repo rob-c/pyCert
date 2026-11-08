@@ -68,7 +68,7 @@ Everything above is verifiable from the sources: the Java template default is in
 ## Install
 
 ```console
-$ git clone <this repo> ~/src/pyCert
+$ git clone https://github.com/rob-c/pyCert ~/src/pyCert
 $ cd ~/src/pyCert
 $ python3 -m venv .venv
 $ .venv/bin/pip install -e .
