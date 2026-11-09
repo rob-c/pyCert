@@ -36,6 +36,19 @@ right, and the actions you actually use on a toolbar.
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Appearance
+
+The GUI follows the operating-system appearance at startup and while running.
+Use **View → Appearance → System / Light / Dark** to override it. For automated
+or remote launches, set `PYCERT_THEME=light`, `PYCERT_THEME=dark` or
+`PYCERT_THEME=system`.
+
+The theme covers ttk widgets, the certificate details, activity log, wait
+dialog log and PIN field. In dark mode the log and certificate panes use a
+dark text background with readable foreground and selection colours instead of
+white blocks. System detection uses macOS `defaults`, the Windows personalise
+registry key, or GTK/gsettings/terminal colour hints on Linux.
+
 ## Certificate list
 
 * **Alias / common name**, type, pyCert status, expiry date, days remaining and
@@ -67,7 +80,9 @@ right, and the actions you actually use on a toolbar.
 **Certificate** renders everything from the certificate (subject, issuer, serial,
 validity, key, signature algorithm, SHA-256, basic constraints, key usage, EKU,
 SANs, AIA/CRL URLs, SKI/AKI) plus the full chain with per-certificate expiry and
-fingerprints, and the file locations. PEM bodies are intentionally not shown.
+fingerprints, and the file locations. PEM bodies are intentionally not shown in
+this request view; the separate bundle inspector shows public certificate PEM
+only.
 
 **History** is the audit trail pyCert recorded: submission, status changes,
 download, export, renewal, revocation, with timestamps and details.
@@ -85,6 +100,27 @@ download, export, renewal, revocation, with timestamps and details.
 | **Renew** | Creates a new key and a PPPK-authenticated renewal; offers to wait immediately. |
 | **Revoke** | Reason picker plus an explicit confirmation checkbox. |
 | **Open folder** | Reveals the request directory in Finder/Explorer/desktop. |
+| **Inspect Java bundle...** | Opens a read-only viewer for all certificates in a legacy Java/PKCS#12/PEM bundle. |
+
+### Inspecting a legacy Java bundle
+
+**File → Inspect Java bundle...** opens a read-only viewer for:
+
+* CertWizard `cakeystore.pkcs12` / `.p12` / `.pfx` files;
+* Java JKS and JCEKS trust stores (`.jks`, `.keystore`, `.jceks`);
+* PEM, DER and PKCS#7 certificate bundles.
+
+Select the file, enter the passphrase if the bundle is encrypted, and press
+**Decode**. The table lists every certificate with its role (`leaf`, `chain`,
+`trusted` or `certificate`), subject, issuer, expiry, key, SHA-256 fingerprint
+and Java alias where available. Selecting a row shows the decoded fields and
+the public certificate PEM.
+
+The viewer never displays private keys. **Copy selected PEM**, **Copy all PEM**
+and **Save all PEM...** operate on certificates only. It does not import or
+modify the bundle; use **File → Import PKCS#12...** for the separate import
+workflow. JKS integrity is verified when a password is supplied; without one,
+the certificates are still shown with a warning.
 
 ### New request dialog
 

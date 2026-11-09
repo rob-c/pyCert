@@ -37,6 +37,13 @@ $ pycert import ~/.ca/cakeystore.pkcs12 --alias "old cert"
 * Use `--allow-unverified-chain` if the certificate was issued by a CA that is
   not in your configured chain and you have checked it manually.
 
+Before importing, you can inspect the whole file without changing anything:
+start `pycert gui`, choose **File → Inspect Java bundle...**, select
+`cakeystore.pkcs12` and enter its passphrase. The viewer lists every certificate
+with its Java alias, role, subject, issuer and fingerprint, and can save all
+public certificates as PEM. It also understands `.jks`/`.jceks` trust stores
+and PEM/DER bundles. Java is not required for this inspection.
+
 If your Java keystore contains several entries, import them one at a time with
 distinct `--alias` values. `keytool -list -keystore ~/.ca/cakeystore.pkcs12
 -storetype pkcs12` prints the aliases (Java is still required for that one-time

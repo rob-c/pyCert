@@ -34,6 +34,12 @@ chain inspection and one-click verification:
 $ pycert gui
 ```
 
+The GUI follows the operating system's light/dark appearance by default. Use
+**View → Appearance** to choose **System**, **Light** or **Dark** at runtime;
+`PYCERT_THEME=light|dark|system` provides the same choice for unattended
+launches. Logs, certificate text, PIN dialogs and the activity log use the
+selected theme rather than fixed white backgrounds.
+
 ---
 
 ## What this repository contains
@@ -178,6 +184,30 @@ A renewal does not overwrite a working certificate until the replacement has
 been issued and verified. The new files are written as `key.next.pem` and
 `request.next.csr`; the old files are archived under `previous/<timestamp>/`
 only after verification succeeds.
+
+### Inspect an old Java bundle
+
+The GUI can open a legacy CertWizard PKCS#12 file, a Java JKS/JCEKS trust
+store, or a PEM/DER certificate bundle without importing it first:
+
+1. Start `pycert gui`.
+2. Choose **File → Inspect Java bundle...**.
+3. Select the file and enter its passphrase if required.
+4. Every certificate is listed with its role (`leaf`, `chain`, `trusted` or
+   `certificate`), subject, issuer, expiry, key, SHA-256 fingerprint and alias.
+   Selecting a row shows the decoded fields and the certificate PEM.
+
+The viewer is read-only: it never displays or exports private keys. **Copy
+selected PEM**, **Copy all PEM** and **Save all PEM...** are available when you
+need the public certificates. PKCS#12 files keep their private key on disk and
+are not modified; use `pycert import` when you want to add a key and certificate
+to pyCert's own request store.
+
+Java PKCS#12 files with legacy PBE-SHA1-3DES or RC2 encryption are decoded via
+`cryptography`/OpenSSL where the installed library supports them. JKS/JCEKS
+certificate entries are parsed natively; a supplied JKS password verifies the
+integrity digest, while leaving it blank still lists the certificates with a
+warning that the digest was not checked.
 
 ---
 
@@ -584,7 +614,7 @@ use Python 3.9+ for new deployments.
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # full test suite (7,360 tests)
+$ make test           # full test suite (7,372 tests)
 $ make coverage       # full suite + 100% non-GUI line coverage gate
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6
@@ -621,6 +651,7 @@ src/pycert/
 ├── certs.py           certificate/key helpers
 ├── csr.py             PKCS#10 construction
 ├── p12.py             PKCS#12 read/write
+├── bundles.py         legacy Java/PEM certificate bundle decoder
 ├── pkcs12_writer.py   modern PKCS#12 container
 ├── store.py           on-disk state, permissions and locking
 ├── secrets_store.py   keychain/secret-service/file/command backends

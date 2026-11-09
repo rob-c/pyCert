@@ -109,3 +109,90 @@ def test_gui_dialogs_build(config, issued):
 
 
 pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+
+
+def test_gui_inspects_java_certificate_bundle(config, issued, tmp_path):
+    from pycert import p12
+
+    state = issued("bundle gui")
+    app = _app(config)
+    try:
+        key = app.ctx.store.load_key(state, app.ctx.key_passphrase())
+        leaf = app.ctx.store.load_certificate(state)
+        chain = app.ctx.store.load_chain(state)
+        path = tmp_path / "java-bundle.p12"
+        p12.write_pkcs12(path, key=key, certificate=leaf, chain=chain, password="secret")
+
+        from pycert.gui import BundleDialog
+
+        dialog = BundleDialog(app, path)
+        app.update()
+        dialog.password_var.set("secret")
+        dialog.load()
+        app.update()
+        rows = dialog.tree.get_children()
+        assert len(rows) == len(chain) + 1
+        assert dialog.tree.item("0", "values")[1] == "leaf"
+        dialog.tree.selection_set("0")
+        dialog._show_details()
+        details = dialog.details.get("1.0", "end")
+        assert "BEGIN CERTIFICATE" in details
+        assert "Subject" in details
+        assert "private key" in dialog.summary_label.cget("text")
+        dialog.destroy()
+    finally:
+        app.destroy()
+
+
+def test_gui_dark_mode_updates_text_and_pin_dialog(config, monkeypatch):
+    import tkinter as tk
+
+    from pycert import gui
+
+    monkeypatch.setenv("PYCERT_THEME", "dark")
+    app = _app(config)
+    try:
+        assert app._dark is True
+        assert app.style.theme_use() == "clam"
+        for widget in (app.log_text, app.cert_text, app.history_text):
+            assert widget.cget("background") == gui.DARK_COLORS["text_bg"]
+            assert widget.cget("foreground") == gui.DARK_COLORS["text_fg"]
+        assert app.tree.tag_configure("valid")["foreground"] == gui.DARK_COLORS["tag_valid"]
+
+        app.set_appearance("light")
+        assert app.log_text.cget("background") == gui.LIGHT_COLORS["text_bg"]
+        assert app.tree.tag_configure("valid")["foreground"] == gui.LIGHT_COLORS["tag_valid"]
+        app.set_appearance("dark")
+        assert app.log_text.cget("background") == gui.DARK_COLORS["text_bg"]
+
+        monkeypatch.setattr(tk.Toplevel, "wait_window", lambda *args, **kwargs: None)
+        dialog = gui.PinDialog(app, "1234567890AB", "Jane Doe")
+        app.update()
+
+        def find_entry(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, tk.Entry):
+                    return child
+                found = find_entry(child)
+                if found is not None:
+                    return found
+            return None
+
+        pin_entry = find_entry(dialog)
+        assert pin_entry is not None
+        assert pin_entry.cget("readonlybackground") == gui.DARK_COLORS["field"]
+        assert dialog.cget("background") == gui.DARK_COLORS["bg"]
+        dialog.destroy()
+    finally:
+        app.destroy()
+
+
+def test_system_dark_mode_override(monkeypatch):
+    from pycert import gui
+
+    monkeypatch.setenv("PYCERT_THEME", "dark")
+    assert gui._detect_system_dark() is True
+    monkeypatch.setenv("PYCERT_THEME", "light")
+    assert gui._detect_system_dark() is False
+    monkeypatch.setenv("PYCERT_THEME", "system")
+    assert gui._initial_appearance_mode() == "system"

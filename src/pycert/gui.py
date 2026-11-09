@@ -31,7 +31,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
-from . import __version__, certs
+from . import __version__, bundles, certs
 from .config import ChainEntry, Config, load_config, write_config
 from .errors import NotFound, PyCertError
 from .secrets_store import SecretStore
@@ -52,7 +52,141 @@ from .workflow import (
 
 APP_TITLE = "pyCert - UK e-Science CA"
 ACCENT = "#0b5cad"
-MUTED = "#666666"
+
+LIGHT_COLORS = {
+    "bg": "#f4f4f4",
+    "panel": "#ffffff",
+    "field": "#ffffff",
+    "text_bg": "#fbfbfb",
+    "text_fg": "#1d1d1f",
+    "fg": "#1d1d1f",
+    "muted": "#666666",
+    "border": "#c9c9c9",
+    "select_bg": "#cfe3ff",
+    "select_fg": "#111111",
+    "tooltip_bg": "#ffffe0",
+    "tooltip_fg": "#222222",
+    "button": "#e9e9e9",
+    "button_active": "#dcdcdc",
+    "tree_bg": "#ffffff",
+    "tree_fg": "#1d1d1f",
+    "tree_heading": "#ececec",
+    "tab_bg": "#e8e8e8",
+    "tab_selected": "#ffffff",
+    "accent": ACCENT,
+    "tag_pending": "#8a5a00",
+    "tag_valid": "#155724",
+    "tag_expiring": "#a94400",
+    "tag_expired": "#9b1c1c",
+    "tag_revoked": "#6b1d6b",
+    "tag_failed": "#9b1c1c",
+}
+DARK_COLORS = {
+    "bg": "#1e1f22",
+    "panel": "#25272b",
+    "field": "#2d3035",
+    "text_bg": "#1b1c1f",
+    "text_fg": "#e6e6e6",
+    "fg": "#e6e6e6",
+    "muted": "#b8bcc4",
+    "border": "#4a4f57",
+    "select_bg": "#2f6f9f",
+    "select_fg": "#ffffff",
+    "tooltip_bg": "#3a3a24",
+    "tooltip_fg": "#f5f5f5",
+    "button": "#33373d",
+    "button_active": "#41464e",
+    "tree_bg": "#25272b",
+    "tree_fg": "#e6e6e6",
+    "tree_heading": "#30343a",
+    "tab_bg": "#2a2d32",
+    "tab_selected": "#25272b",
+    "accent": "#4d9de0",
+    "tag_pending": "#e0b050",
+    "tag_valid": "#7fcf8a",
+    "tag_expiring": "#ff9f5a",
+    "tag_expired": "#ff7070",
+    "tag_revoked": "#d58cff",
+    "tag_failed": "#ff7070",
+}
+_ACTIVE_COLORS = LIGHT_COLORS
+MUTED = LIGHT_COLORS["muted"]
+
+
+def _colors() -> dict:
+    return _ACTIVE_COLORS
+
+
+def _initial_appearance_mode() -> str:
+    value = os.environ.get("PYCERT_THEME", "").strip().lower()
+    return value if value in ("system", "light", "dark") else "system"
+
+
+def _detect_system_dark() -> bool:
+    """Best-effort OS appearance detection, with a PYCERT_THEME override."""
+    override = os.environ.get("PYCERT_THEME", "").strip().lower()
+    if override in ("light", "dark"):
+        return override == "dark"
+
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+                universal_newlines=True,  # noqa: UP021 - Python 3.6 has no text=
+            )
+            if result.returncode == 0 and "dark" in result.stdout.lower():
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    if os.name == "nt":  # pragma: no cover - Windows-only branch
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            ) as key:
+                light, _kind = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return int(light) == 0
+        except (ImportError, OSError, ValueError):
+            pass
+
+    gtk_theme = os.environ.get("GTK_THEME", "").lower()
+    if "dark" in gtk_theme:
+        return True
+    colorfgbg = os.environ.get("COLORFGBG", "")
+    if colorfgbg:
+        try:
+            # COLORFGBG is foreground;background, e.g. 15;0 for a dark terminal.
+            background = int(colorfgbg.rsplit(";", 1)[-1])
+            return background < 7
+        except ValueError:
+            pass
+    try:
+        result = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+            universal_newlines=True,  # noqa: UP021 - Python 3.6 has no text=
+        )
+        if result.returncode == 0 and "prefer-dark" in result.stdout.lower():
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+def _resolve_dark(mode: str) -> bool:
+    if mode == "dark":
+        return True
+    if mode == "light":
+        return False
+    return _detect_system_dark()
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +215,20 @@ class Tooltip:
             return
         x = self.widget.winfo_rootx() + 12
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        colors = _colors()
         self._window = tk.Toplevel(self.widget)
+        self._window.configure(background=colors["bg"])
         self._window.wm_overrideredirect(True)
         self._window.wm_geometry(f"+{x}+{y}")
         tk.Label(
-            self._window, text=self.text, padx=6, pady=4, background="#ffffe0", relief="solid", borderwidth=1
+            self._window,
+            text=self.text,
+            padx=6,
+            pady=4,
+            background=colors["tooltip_bg"],
+            foreground=colors["tooltip_fg"],
+            relief="solid",
+            borderwidth=1,
         ).pack()
 
     def _hide(self, _event=None) -> None:
@@ -98,6 +241,7 @@ class Tooltip:
 
 
 def _readonly_text(parent: tk.Widget, height: int = 12) -> "tuple[tk.Text, ttk.Scrollbar, tk.Frame]":
+    colors = _colors()
     frame = ttk.Frame(parent)
     text = tk.Text(
         frame,
@@ -108,7 +252,13 @@ def _readonly_text(parent: tk.Widget, height: int = 12) -> "tuple[tk.Text, ttk.S
         padx=10,
         pady=8,
         font=("TkFixedFont", 11),
-        background="#fbfbfb",
+        background=colors["text_bg"],
+        foreground=colors["text_fg"],
+        insertbackground=colors["text_fg"],
+        selectbackground=colors["select_bg"],
+        selectforeground=colors["select_fg"],
+        highlightbackground=colors["bg"],
+        highlightcolor=colors["accent"],
     )
     scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
     text.configure(yscrollcommand=scroll.set, state="disabled")
@@ -154,6 +304,8 @@ class PinDialog(tk.Toplevel):
         self.title("PIN for the RA")
         self.transient(parent)
         self.resizable(False, False)
+        colors = _colors()
+        self.configure(background=colors["bg"])
         body = ttk.Frame(self, padding=18)
         body.pack(fill="both", expand=True)
         ttk.Label(body, text=f"PIN for {common_name}", font=("TkDefaultFont", 13, "bold")).pack(anchor="w")
@@ -165,11 +317,23 @@ class PinDialog(tk.Toplevel):
             ),
             wraplength=520,
             justify="left",
-            foreground=MUTED,
+            style="Subtle.TLabel",
         ).pack(anchor="w", pady=(4, 12))
-        entry = tk.Entry(body, font=("TkFixedFont", 20), justify="center", relief="solid", borderwidth=1)
+        entry = tk.Entry(
+            body,
+            font=("TkFixedFont", 20),
+            justify="center",
+            relief="solid",
+            borderwidth=1,
+            background=colors["field"],
+            foreground=colors["text_fg"],
+            insertbackground=colors["text_fg"],
+            selectbackground=colors["select_bg"],
+            selectforeground=colors["select_fg"],
+            highlightbackground=colors["border"],
+        )
         entry.insert(0, pin)
-        entry.configure(state="readonly", readonlybackground="#ffffff")
+        entry.configure(state="readonly", readonlybackground=colors["field"])
         entry.pack(fill="x", ipady=8)
         entry.focus_set()
         buttons = ttk.Frame(body)
@@ -204,6 +368,7 @@ class WaitDialog(tk.Toplevel):
         on_done: Callable[[object], None],
     ):
         super().__init__(parent)
+        self.configure(background=_colors()["bg"])
         self.title(title)
         self.transient(parent)
         self.resizable(True, True)
@@ -285,6 +450,7 @@ class WaitDialog(tk.Toplevel):
 class NewRequestDialog(tk.Toplevel):
     def __init__(self, app: "PyCertApp"):  # noqa: F821
         super().__init__(app)
+        self.configure(background=_colors()["bg"])
         self.app = app
         self.ctx = app.ctx
         self.cfg = app.cfg
@@ -340,7 +506,7 @@ class NewRequestDialog(tk.Toplevel):
         ttk.Label(outer, text="Contact e-mail").grid(row=3, column=0, sticky="e", **pad)
         self.email_var = tk.StringVar(value=self.cfg.identity.email)
         ttk.Entry(outer, textvariable=self.email_var).grid(row=3, column=1, sticky="we", **pad)
-        self.email_hint = ttk.Label(outer, text="", foreground=MUTED)
+        self.email_hint = ttk.Label(outer, text="", style="Subtle.TLabel")
         self.email_hint.grid(row=3, column=2, sticky="w")
 
         ttk.Label(outer, text="RA").grid(row=4, column=0, sticky="e", **pad)
@@ -389,7 +555,7 @@ class NewRequestDialog(tk.Toplevel):
         san_frame.grid(row=7, column=1, sticky="we", **pad)
         self.san_var = tk.StringVar()
         ttk.Entry(san_frame, textvariable=self.san_var).pack(fill="x")
-        ttk.Label(outer, text="Comma-separated DNS names, IPs or e-mails", foreground=MUTED).grid(
+        ttk.Label(outer, text="Comma-separated DNS names, IPs or e-mails", style="Subtle.TLabel").grid(
             row=7, column=2, sticky="w"
         )
 
@@ -397,7 +563,7 @@ class NewRequestDialog(tk.Toplevel):
         self.auth_var = tk.StringVar()
         self.auth_combo = ttk.Combobox(outer, textvariable=self.auth_var, state="readonly")
         self.auth_combo.grid(row=8, column=1, sticky="we", **pad)
-        self.auth_hint = ttk.Label(outer, text="", foreground=MUTED)
+        self.auth_hint = ttk.Label(outer, text="", style="Subtle.TLabel")
         self.auth_hint.grid(row=8, column=2, sticky="w")
 
         pin_frame = ttk.LabelFrame(outer, text="PIN", padding=10)
@@ -424,7 +590,7 @@ class NewRequestDialog(tk.Toplevel):
                 "At least 10 characters. The RA checks it by hashing what you tell them, so keep it\n"
                 "short enough to read out, but not guessable. pyCert never stores it."
             ),
-            foreground=MUTED,
+            style="Subtle.TLabel",
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         options = ttk.Frame(outer)
@@ -436,7 +602,7 @@ class NewRequestDialog(tk.Toplevel):
         self.export_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(options, text="Write a PKCS#12 file", variable=self.export_var).pack(anchor="w")
 
-        self.status_label = ttk.Label(outer, text="", foreground=MUTED, wraplength=680)
+        self.status_label = ttk.Label(outer, text="", style="Subtle.TLabel", wraplength=680)
         self.status_label.grid(row=11, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         buttons = ttk.Frame(outer)
@@ -575,6 +741,7 @@ class NewRequestDialog(tk.Toplevel):
 class RevokeDialog(tk.Toplevel):
     def __init__(self, app: "PyCertApp", state: RequestState):  # noqa: F821
         super().__init__(app)
+        self.configure(background=_colors()["bg"])
         self.app = app
         self.state = state
         self.title("Revoke certificate")
@@ -589,7 +756,7 @@ class RevokeDialog(tk.Toplevel):
                 "Revocation is permanent and immediately visible to relying services.\n"
                 "The local files are kept, but the status is marked REVOKED."
             ),
-            foreground=MUTED,
+            style="Subtle.TLabel",
             justify="left",
         ).pack(anchor="w", pady=(4, 12))
         ttk.Label(body, text="Reason").pack(anchor="w")
@@ -651,6 +818,7 @@ class RevokeDialog(tk.Toplevel):
 class SettingsDialog(tk.Toplevel):
     def __init__(self, app: "PyCertApp"):  # noqa: F821
         super().__init__(app)
+        self.configure(background=_colors()["bg"])
         self.app = app
         self.cfg = app.cfg
         self.ctx = app.ctx
@@ -687,7 +855,7 @@ class SettingsDialog(tk.Toplevel):
         widget.grid(row=row, column=1, sticky="we", pady=6)
         if hint:
             frame.columnconfigure(2, weight=1)
-            ttk.Label(frame, text=hint, foreground=MUTED, wraplength=300, justify="left").grid(
+            ttk.Label(frame, text=hint, style="Subtle.TLabel", wraplength=300, justify="left").grid(
                 row=row, column=2, sticky="w", padx=(12, 0), pady=6
             )
 
@@ -835,7 +1003,7 @@ class SettingsDialog(tk.Toplevel):
             ttk.Entry(frame, textvariable=self.command),
             "for backend=command; reads stdout / writes stdin",
         )
-        ttk.Label(frame, text=f"Active backend: {self.ctx.secrets}", foreground=MUTED).grid(
+        ttk.Label(frame, text=f"Active backend: {self.ctx.secrets}", style="Subtle.TLabel").grid(
             row=4, column=1, sticky="w", pady=(10, 4)
         )
         ttk.Button(frame, text="Test the secret store", command=self._test_secret).grid(
@@ -847,7 +1015,7 @@ class SettingsDialog(tk.Toplevel):
                 "Changing the backend does not move an existing secret. Use 'pycert secret set'\n"
                 "after saving if you switch backends."
             ),
-            foreground=MUTED,
+            style="Subtle.TLabel",
             justify="left",
         ).grid(row=6, column=1, sticky="w", pady=(12, 0))
 
@@ -873,7 +1041,7 @@ class SettingsDialog(tk.Toplevel):
                 "Entries are pinned by SHA-256. Adding the issuing CA and the root gives the\n"
                 "shortest, most reliable chain for exported PKCS#12 files."
             ),
-            foreground=MUTED,
+            style="Subtle.TLabel",
             justify="left",
         ).grid(row=2, column=0, sticky="w", pady=(10, 0))
 
@@ -1004,6 +1172,274 @@ class SettingsDialog(tk.Toplevel):
 
 
 # ---------------------------------------------------------------------------
+# Certificate bundle viewer
+# ---------------------------------------------------------------------------
+
+
+class BundleDialog(tk.Toplevel):
+    """Read-only viewer for the certificates inside a Java/PKCS#12/PEM bundle."""
+
+    def __init__(self, parent: "PyCertApp", path: "Path | None" = None):  # noqa: F821
+        super().__init__(parent)
+        self.configure(background=_colors()["bg"])
+        self.parent = parent
+        self.bundle: "bundles.CertificateBundle | None" = None
+        self._path = path
+        self.title("Inspect certificate bundle")
+        self.transient(parent)
+        self.geometry("1120x720")
+        self.minsize(820, 520)
+        self.path_var = tk.StringVar(value=str(path) if path else "")
+        self.password_var = tk.StringVar()
+        self.show_password = tk.BooleanVar(value=False)
+        self._build()
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.bind("<Return>", lambda _e: self.load())
+        if path:
+            self.after(80, lambda: self.load(auto=True))
+        else:
+            self.after(80, self.password_entry.focus_set)
+
+    def _build(self) -> None:
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(1, weight=1)
+
+        ttk.Label(outer, text="Certificate bundle", font=("TkDefaultFont", 15, "bold")).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
+        )
+
+        ttk.Label(outer, text="File").grid(row=1, column=0, sticky="e", padx=(0, 8))
+        ttk.Entry(outer, textvariable=self.path_var).grid(row=1, column=1, sticky="we")
+        ttk.Button(outer, text="Browse...", command=self._browse).grid(row=1, column=2, padx=(8, 0))
+
+        ttk.Label(outer, text="Passphrase").grid(row=2, column=0, sticky="e", padx=(0, 8), pady=(8, 0))
+        self.password_entry = ttk.Entry(
+            outer, textvariable=self.password_var, show="*", width=36
+        )
+        self.password_entry.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            outer,
+            text="Show",
+            variable=self.show_password,
+            command=self._toggle_password,
+        ).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        self.load_button = ttk.Button(outer, text="Decode", command=self.load)
+        self.load_button.grid(row=2, column=3, sticky="e", pady=(8, 0))
+
+        self.summary_label = ttk.Label(outer, text="Choose a file and decode it.", style="Subtle.TLabel")
+        self.summary_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 4))
+
+        paned = ttk.PanedWindow(outer, orient="vertical")
+        paned.grid(row=4, column=0, columnspan=4, sticky="nsew")
+        outer.rowconfigure(4, weight=1)
+        tree_frame = ttk.Frame(paned)
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        columns = ("index", "role", "subject", "issuer", "expires", "key", "fingerprint", "alias")
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=9)
+        headings = {
+            "index": ("#", 35),
+            "role": ("Role", 90),
+            "subject": ("Subject", 350),
+            "issuer": ("Issuer", 290),
+            "expires": ("Expires", 95),
+            "key": ("Key", 95),
+            "fingerprint": ("SHA-256", 340),
+            "alias": ("Alias", 120),
+        }
+        for column, (title, width) in headings.items():
+            self.tree.heading(column, text=title)
+            self.tree.column(column, width=width, anchor="w", stretch=column in ("subject", "issuer"))
+        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.tree.bind("<<TreeviewSelect>>", self._show_details)
+        paned.add(tree_frame, weight=3)
+
+        detail_frame = ttk.Frame(paned)
+        self.details, _scroll, inner = _readonly_text(detail_frame, height=12)
+        inner.pack(fill="both", expand=True)
+        paned.add(detail_frame, weight=2)
+
+        buttons = ttk.Frame(outer)
+        buttons.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self.copy_button = ttk.Button(buttons, text="Copy selected PEM", command=self._copy_pem)
+        self.copy_button.pack(side="left")
+        self.copy_all_button = ttk.Button(buttons, text="Copy all PEM", command=self._copy_all)
+        self.copy_all_button.pack(side="left", padx=(8, 0))
+        self.save_button = ttk.Button(buttons, text="Save all PEM...", command=self._save_all)
+        self.save_button.pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+        self._set_bundle_buttons(False)
+
+    def _toggle_password(self) -> None:
+        self.password_entry.configure(show="" if self.show_password.get() else "*")
+
+    def _browse(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Open certificate bundle",
+            filetypes=[
+                ("Java keystore / PKCS#12", "*.p12 *.pfx *.pkcs12 *.jks *.keystore *.jceks"),
+                ("PEM/DER certificates", "*.pem *.crt *.cer *.der *.bundle"),
+                ("All files", "*"),
+            ],
+        )
+        if path:
+            self.path_var.set(path)
+            self.load(auto=True)
+
+    def load(self, auto: bool = False) -> None:
+        raw_path = self.path_var.get().strip()
+        if not raw_path:
+            self._status("Choose a bundle file first.")
+            return
+        path = Path(raw_path).expanduser()
+        try:
+            bundle = bundles.load_bundle(path, self.password_var.get())
+        except PyCertError as exc:
+            self._status(str(exc))
+            if auto:
+                self.password_entry.focus_set()
+            else:
+                messagebox.showerror("Could not decode bundle", str(exc), parent=self)
+            return
+        self.bundle = bundle
+        self._populate()
+        self._status(self._summary(bundle))
+
+    def _populate(self) -> None:
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        assert self.bundle is not None
+        for entry in self.bundle.certificates:
+            description = certs.describe_certificate(entry.certificate)
+            self.tree.insert(
+                "",
+                "end",
+                iid=str(entry.index),
+                values=(
+                    entry.index,
+                    entry.role,
+                    description.subject,
+                    description.issuer,
+                    str(description.not_after.date()),
+                    description.key,
+                    description.fingerprint_sha256,
+                    entry.alias,
+                ),
+            )
+        if self.bundle.certificates:
+            self.tree.selection_set("0")
+            self.tree.focus("0")
+            self._show_details()
+        self._set_bundle_buttons(True)
+
+    def _summary(self, bundle: "bundles.CertificateBundle") -> str:
+        parts = [bundle.format.upper(), "%d certificate%s" % (len(bundle), "" if len(bundle) == 1 else "s")]
+        if bundle.has_private_key:
+            parts.append("private key: %s (not displayed)" % (bundle.key_description or "present"))
+        else:
+            parts.append("no private key")
+        if bundle.integrity_checked:
+            parts.append("integrity verified")
+        text = " · ".join(parts)
+        if bundle.warnings:
+            text += "\n" + " · ".join(bundle.warnings)
+        return text
+
+    def _status(self, text: str) -> None:
+        self.summary_label.configure(text=text)
+
+    def _set_bundle_buttons(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for button in (self.copy_button, self.copy_all_button, self.save_button):
+            button.configure(state=state)
+
+    def _selected_entry(self) -> "bundles.BundleCertificate | None":
+        selection = self.tree.selection()
+        if not selection or self.bundle is None:
+            return None
+        index = int(selection[0])
+        if 0 <= index < len(self.bundle.certificates):
+            return self.bundle.certificates[index]
+        return None
+
+    def _show_details(self, _event=None) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            _set_text(self.details, "")
+            return
+        description = certs.describe_certificate(entry.certificate)
+        lines = [
+            "Bundle       %s" % (self.bundle.path if self.bundle else ""),
+            "Format       %s" % (self.bundle.format.upper() if self.bundle else ""),
+            "Role         %s" % entry.role,
+        ]
+        if entry.alias:
+            lines.append("Alias        %s" % entry.alias)
+        lines.extend(
+            [
+                "",
+                "Subject      %s" % description.subject,
+                "Issuer       %s" % description.issuer,
+                "Serial       %s" % description.serial,
+                "Validity     %s .. %s" % (description.not_before.date(), description.not_after.date()),
+                "Days left    %s" % description.days_remaining,
+                "Key          %s" % description.key,
+                "Signature    %s" % description.signature,
+                "SHA-256      %s" % description.fingerprint_sha256,
+                "Basic        %s" % description.basic_constraints,
+                "Key usage    %s" % (", ".join(description.key_usage) or "(none)"),
+                "EKU          %s" % (", ".join(description.extended_key_usage) or "(none)"),
+                "SANs         %s" % (", ".join(description.subject_alt_names) or "(none)"),
+            ]
+        )
+        if description.aia_urls:
+            lines.append("AIA          %s" % ", ".join(description.aia_urls))
+        if description.crl_urls:
+            lines.append("CRL          %s" % ", ".join(description.crl_urls))
+        lines.append("SKI          %s" % description.subject_key_id)
+        lines.append("AKI          %s" % description.authority_key_id)
+        lines.extend(["", "Certificate PEM:", "", certs.cert_pem(entry.certificate)])
+        _set_text(self.details, "\n".join(lines))
+
+    def _all_pem(self) -> str:
+        if self.bundle is None:
+            return ""
+        return "".join(certs.cert_pem(entry.certificate) for entry in self.bundle.certificates)
+
+    def _copy_pem(self) -> None:
+        entry = self._selected_entry()
+        if entry is not None:
+            _clipboard(self, certs.cert_pem(entry.certificate))
+            self._status("Selected certificate copied to the clipboard.")
+
+    def _copy_all(self) -> None:
+        text = self._all_pem()
+        if text:
+            _clipboard(self, text)
+            self._status("All %d certificates copied to the clipboard." % len(self.bundle.certificates))
+
+    def _save_all(self) -> None:
+        if self.bundle is None:
+            return
+        default = Path(self.bundle.path).with_suffix(".pem").name if self.bundle.path else "certificates.pem"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save certificates as PEM",
+            defaultextension=".pem",
+            initialfile=default,
+            filetypes=[("PEM certificates", "*.pem"), ("All files", "*")],
+        )
+        if path:
+            Path(path).write_text(self._all_pem())
+            self._status("Saved %d certificates to %s." % (len(self.bundle), path))
+
+
+# ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
 
@@ -1020,6 +1456,10 @@ class PyCertApp(tk.Tk):
         self._selected_alias: "str | None" = None
         self._sort_column = "alias"
         self._sort_reverse = False
+        self.appearance_mode = _initial_appearance_mode()
+        self._dark = _resolve_dark(self.appearance_mode)
+        self.appearance_var = tk.StringVar(value=self.appearance_mode)
+        self._appearance_after: "str | None" = None
 
         self.title(f"{APP_TITLE} - {self.cfg.profile}")
         self.geometry("1220x800")
@@ -1032,15 +1472,30 @@ class PyCertApp(tk.Tk):
         self._build_log()
         self._build_statusbar()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._apply_theme_widgets()
         self.refresh_list()
         self.after(120, self._drain_queue)
+        self._appearance_after = self.after(5000, self._poll_system_appearance)
         if startup_ping:
             self.after(400, self._startup_ping)
 
     # -- styling -----------------------------------------------------------
     def _build_style(self) -> None:
-        style = ttk.Style(self)
-        if sys.platform == "darwin":
+        self.style = ttk.Style(self)
+        self._apply_theme_styles()
+
+    def _apply_theme_styles(self) -> None:
+        """Apply the light or dark palette to ttk and the root window."""
+        global _ACTIVE_COLORS
+        _ACTIVE_COLORS = DARK_COLORS if self._dark else LIGHT_COLORS
+        colors = _ACTIVE_COLORS
+        style = self.style
+        if self._dark:
+            try:
+                style.theme_use("clam")
+            except tk.TclError:
+                pass
+        elif sys.platform == "darwin":
             try:
                 style.theme_use("aqua")
             except tk.TclError:
@@ -1050,12 +1505,197 @@ class PyCertApp(tk.Tk):
                 style.theme_use("clam")
             except tk.TclError:
                 pass
+
         style.configure("Heading.TLabel", font=("TkDefaultFont", 18, "bold"))
-        style.configure("Subtle.TLabel", foreground=MUTED)
-        style.configure("Status.TLabel", padding=(8, 4))
+        style.configure("Subtle.TLabel", foreground=colors["muted"], background=colors["bg"])
+        style.configure("Status.TLabel", padding=(8, 4), background=colors["bg"], foreground=colors["fg"])
         style.configure("Treeview", rowheight=24)
         style.configure("Treeview.Heading", font=("TkDefaultFont", 10, "bold"))
         style.configure("Accent.TButton", font=("TkDefaultFont", 11, "bold"))
+
+        style.configure("TFrame", background=colors["bg"])
+        style.configure("TLabel", background=colors["bg"], foreground=colors["fg"])
+        style.configure("TLabelframe", background=colors["bg"], foreground=colors["fg"])
+        style.configure("TLabelframe.Label", background=colors["bg"], foreground=colors["fg"])
+        style.configure("TPanedwindow", background=colors["bg"])
+        style.configure("TButton", background=colors["button"], foreground=colors["fg"])
+        style.map(
+            "TButton",
+            background=[("active", colors["button_active"]), ("pressed", colors["button_active"])],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=colors["field"],
+            foreground=colors["text_fg"],
+            insertcolor=colors["text_fg"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+        )
+        style.map(
+            "TEntry",
+            fieldbackground=[("readonly", colors["field"])],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=colors["field"],
+            background=colors["button"],
+            foreground=colors["fg"],
+            arrowcolor=colors["fg"],
+            selectbackground=colors["select_bg"],
+            selectforeground=colors["select_fg"],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", colors["field"])],
+            background=[("active", colors["button_active"])],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure("TCheckbutton", background=colors["bg"], foreground=colors["fg"])
+        style.configure("TRadiobutton", background=colors["bg"], foreground=colors["fg"])
+        style.map(
+            "TCheckbutton",
+            background=[("active", colors["bg"])],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.map(
+            "TRadiobutton",
+            background=[("active", colors["bg"])],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure("TNotebook", background=colors["bg"], borderwidth=0)
+        style.configure(
+            "TNotebook.Tab",
+            background=colors["tab_bg"],
+            foreground=colors["fg"],
+            padding=(10, 4),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", colors["tab_selected"]), ("active", colors["button_active"])],
+            foreground=[("selected", colors["fg"])],
+        )
+        style.configure(
+            "Treeview",
+            background=colors["tree_bg"],
+            fieldbackground=colors["tree_bg"],
+            foreground=colors["tree_fg"],
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=colors["tree_heading"],
+            foreground=colors["fg"],
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", colors["select_bg"])],
+            foreground=[("selected", colors["select_fg"])],
+        )
+        style.configure(
+            "TScrollbar",
+            background=colors["button"],
+            troughcolor=colors["bg"],
+            arrowcolor=colors["fg"],
+            bordercolor=colors["border"],
+        )
+        style.map("TScrollbar", background=[("active", colors["button_active"])])
+        style.configure(
+            "Horizontal.TProgressbar",
+            background=colors["accent"],
+            troughcolor=colors["panel"],
+        )
+        style.configure("TSeparator", background=colors["border"])
+        self.configure(background=colors["bg"])
+        if hasattr(self, "_menus"):
+            self._style_menus()
+
+    def _style_menus(self) -> None:
+        colors = _colors()
+        for menu in self._menus:
+            try:
+                menu.configure(
+                    background=colors["bg"],
+                    foreground=colors["fg"],
+                    activebackground=colors["select_bg"],
+                    activeforeground=colors["select_fg"],
+                    selectcolor=colors["select_bg"],
+                )
+            except tk.TclError:  # pragma: no cover - native menu on some platforms
+                pass
+
+    def _apply_theme_widgets(self) -> None:
+        """Update classic Tk widgets (Text/Entry/Toplevel) after a theme change."""
+        colors = _colors()
+
+        def apply(widget) -> None:
+            if isinstance(widget, tk.Text):
+                widget.configure(
+                    background=colors["text_bg"],
+                    foreground=colors["text_fg"],
+                    insertbackground=colors["text_fg"],
+                    selectbackground=colors["select_bg"],
+                    selectforeground=colors["select_fg"],
+                    highlightbackground=colors["bg"],
+                    highlightcolor=colors["accent"],
+                )
+            elif isinstance(widget, tk.Entry):
+                widget.configure(
+                    background=colors["field"],
+                    foreground=colors["text_fg"],
+                    insertbackground=colors["text_fg"],
+                    disabledforeground=colors["muted"],
+                    readonlybackground=colors["field"],
+                    selectbackground=colors["select_bg"],
+                    selectforeground=colors["select_fg"],
+                    highlightbackground=colors["border"],
+                )
+            elif isinstance(widget, (tk.Tk, tk.Toplevel)):
+                widget.configure(background=colors["bg"])
+            for child in widget.winfo_children():
+                apply(child)
+
+        apply(self)
+
+    def _configure_tree_tags(self) -> None:
+        colors = _colors()
+        for tag in ("pending", "valid", "expiring", "expired", "revoked", "failed"):
+            self.tree.tag_configure(tag, foreground=colors["tag_" + tag])
+
+    def set_appearance(self, mode: str) -> None:
+        """Switch between system, light and dark appearance at runtime."""
+        if mode not in ("system", "light", "dark"):
+            return
+        self.appearance_mode = mode
+        self.appearance_var.set(mode)
+        self._dark = _resolve_dark(mode)
+        self._apply_theme_styles()
+        self._apply_theme_widgets()
+        self._configure_tree_tags()
+        if hasattr(self, "log_text"):
+            actual = "dark" if self._dark else "light"
+            self.log("Appearance: %s (%s)" % (mode, actual))
+
+    def _poll_system_appearance(self) -> None:
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:  # pragma: no cover - window is closing
+            return
+        if self.appearance_mode == "system":
+            dark = _detect_system_dark()
+            if dark != self._dark:
+                self._dark = dark
+                self._apply_theme_styles()
+                self._apply_theme_widgets()
+                self._configure_tree_tags()
+                if hasattr(self, "log_text"):
+                    self.log("System appearance changed: %s" % ("dark" if dark else "light"))
+        try:
+            self._appearance_after = self.after(5000, self._poll_system_appearance)
+        except tk.TclError:  # pragma: no cover - window is closing
+            self._appearance_after = None
 
     # -- menus -------------------------------------------------------------
     def _build_menu(self) -> None:
@@ -1067,6 +1707,7 @@ class PyCertApp(tk.Tk):
             command=self.new_request,
         )
         file_menu.add_command(label="Import PKCS#12...", command=self.import_p12_dialog)
+        file_menu.add_command(label="Inspect Java bundle...", command=self.inspect_bundle_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Open configuration", command=lambda: _open_text_file(self.cfg.path))
         file_menu.add_command(label="Open data folder", command=lambda: _open_path(self.cfg.data_dir))
@@ -1085,6 +1726,22 @@ class PyCertApp(tk.Tk):
         cert_menu.add_command(label="Renew...", command=self.renew_selected)
         cert_menu.add_command(label="Revoke...", command=self.revoke_selected)
         menu.add_cascade(label="Certificate", menu=cert_menu)
+
+        view_menu = tk.Menu(menu, tearoff=False)
+        appearance_menu = tk.Menu(view_menu, tearoff=False)
+        for label, value in (
+            ("System (follow OS)", "system"),
+            ("Light", "light"),
+            ("Dark", "dark"),
+        ):
+            appearance_menu.add_radiobutton(
+                label=label,
+                value=value,
+                variable=self.appearance_var,
+                command=lambda selected=value: self.set_appearance(selected),
+            )
+        view_menu.add_cascade(label="Appearance", menu=appearance_menu)
+        menu.add_cascade(label="View", menu=view_menu)
 
         tools_menu = tk.Menu(menu, tearoff=False)
         tools_menu.add_command(label="Ping the CA", command=self.ping_server)
@@ -1105,6 +1762,8 @@ class PyCertApp(tk.Tk):
         help_menu.add_command(label="About pyCert", command=self.show_about)
         menu.add_cascade(label="Help", menu=help_menu)
         self.configure(menu=menu)
+        self._menus = [menu, file_menu, cert_menu, view_menu, appearance_menu, tools_menu, help_menu]
+        self._style_menus()
 
         modifier = "Command" if sys.platform == "darwin" else "Control"
         self.bind_all(f"<{modifier}-n>", lambda _e: self.new_request())
@@ -1195,12 +1854,7 @@ class PyCertApp(tk.Tk):
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda _e: self.show_details())
-        self.tree.tag_configure("pending", foreground="#8a5a00")
-        self.tree.tag_configure("valid", foreground="#155724")
-        self.tree.tag_configure("expiring", foreground="#a94400")
-        self.tree.tag_configure("expired", foreground="#9b1c1c")
-        self.tree.tag_configure("revoked", foreground="#6b1d6b")
-        self.tree.tag_configure("failed", foreground="#9b1c1c")
+        self._configure_tree_tags()
         paned.add(left, weight=3)
 
         right = ttk.Frame(paned)
@@ -1747,6 +2401,20 @@ class PyCertApp(tk.Tk):
             return
         RevokeDialog(self, state)
 
+    def inspect_bundle_dialog(self) -> None:
+        """Open a read-only viewer for a Java keystore or certificate bundle."""
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Inspect Java bundle",
+            filetypes=[
+                ("Java keystore / PKCS#12", "*.p12 *.pfx *.pkcs12 *.jks *.keystore *.jceks"),
+                ("PEM/DER certificates", "*.pem *.crt *.cer *.der *.bundle"),
+                ("All files", "*"),
+            ],
+        )
+        if path:
+            BundleDialog(self, Path(path))
+
     def import_p12_dialog(self) -> None:
         path = filedialog.askopenfilename(
             parent=self, title="Import PKCS#12", filetypes=[("PKCS#12", "*.p12 *.pfx"), ("All files", "*")]
@@ -1949,6 +2617,12 @@ class PyCertApp(tk.Tk):
 
     def _on_close(self) -> None:
         self._stop_event.set()
+        if self._appearance_after is not None:
+            try:
+                self.after_cancel(self._appearance_after)
+            except tk.TclError:
+                pass
+            self._appearance_after = None
         self.destroy()
 
 
