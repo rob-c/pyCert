@@ -17,6 +17,23 @@ filterwarnings = [
   "ignore:the Tcl interpreter is leaked.*:RuntimeWarning",
 ]
 
+[tool.coverage.run]
+source = ["src/pycert"]
+omit = [
+  "src/pycert/gui.py",  # Tkinter widgets are exercised by smoke/E2E tests; no headless line gate
+]
+branch = false
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  'raise AssertionError\("unreachable"\)',
+]
+
 [tool.ruff]
 line-length = 110
 target-version = "py311"  # ruff has no py36 target; see the ignore list for deliberate 3.6 style

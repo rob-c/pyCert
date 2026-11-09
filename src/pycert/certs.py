@@ -256,9 +256,11 @@ def signature_description(cert: x509.Certificate) -> str:
     oid = cert.signature_algorithm_oid
     algorithm = getattr(oid, "_name", oid.dotted_string)
     try:
-        digest = cert.signature_hash_algorithm.name.upper()
-        return f"{algorithm} ({digest})"
-    except (UnsupportedAlgorithm, ValueError):
+        hash_algorithm = cert.signature_hash_algorithm
+        if hash_algorithm is None:
+            return str(algorithm)
+        return f"{algorithm} ({hash_algorithm.name.upper()})"
+    except (UnsupportedAlgorithm, ValueError, AttributeError):
         return str(algorithm)
 
 
@@ -468,7 +470,12 @@ def verify_certificate_signature(cert: x509.Certificate, issuer: x509.Certificat
         )
     public_key = issuer.public_key()
     try:
-        parameters = signature_parameters(cert)
+        if isinstance(public_key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+            # EdDSA has no separate padding/hash parameters; asking the
+            # generic signature helper for one breaks on older cryptography.
+            parameters = None
+        else:
+            parameters = signature_parameters(cert)
     except (UnsupportedAlgorithm, ValueError) as exc:  # pragma: no cover - exotic algorithms
         raise CryptoError(f"unsupported signature algorithm: {signature_description(cert)}") from exc
     try:

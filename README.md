@@ -55,8 +55,8 @@ workflow) are about 4,000 lines and can be reviewed end to end in an afternoon.
 | Waiting for signing | user clicks refresh repeatedly | `--wait` / `pycert wait`, exponential jitter, cancellable, exit code 3 on timeout |
 | PIN | SHA-1 hash, entered in a Swing dialog | SHA-1 hash (server requirement), generated once and shown in a modal/GUI |
 | Automation | GUI only | CLI + `--json` + exit codes + cron/launchd examples |
-| Tests | a couple of XML parser tests | 7,190+ tests (7,196 at the last check), including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
-| Documentation | `readme.txt` | README, configuration reference, protocol notes, CA-listener contract + Java sandbox, security model, migration guide |
+| Tests | a couple of XML parser tests | 7,360 tests (100% non-GUI line coverage), including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
+| Documentation | `readme.txt` | README, configuration reference, protocol notes, CA-listener and proxy contracts, Java sandbox, security model, migration guide |
 
 Everything above is verifiable from the sources: the Java template default is in
 `src/main/resources/template.configure.properties`, the trust store password in
@@ -96,7 +96,7 @@ picks cryptography 3.3.x automatically.
 The package is validated on Python 3.6.15 with cryptography 3.3.2 in a
 container: install, `pycert selftest`, `init`, `config check`, live `ping`/`ras`
 and `doctor`, plus a full mock-CA request → download → PKCS#12 → renew → revoke
-flow.  The 7,196 test suite itself runs on a modern Python.
+flow.  The 7,360 test suite itself runs on a modern Python.
 
 ---
 
@@ -232,6 +232,7 @@ Global options: `--config PATH`, `--json`, `-q/--quiet`, `-v`, `--debug`.
 | `pycert verify ALIAS` | key/certificate/chain/PKCS#12 checks (exit 4 on failure) |
 | `pycert renew ALIAS` | renewal with a new key, PPPK-authenticated |
 | `pycert renew --due DAYS` | renew every certificate expiring within DAYS (`--dry-run` to preview) |
+| `pycert proxy ALIAS [--hours N] [--remove]` | create/verify a short-lived RFC 3820 proxy bundle |
 | `pycert watch [--once]` | poll pending requests continuously and export them as they are signed |
 | `pycert revoke ALIAS --reason R` | revoke at the CA |
 | `pycert import FILE.p12` | import an existing bundle |
@@ -381,7 +382,8 @@ sandbox for the real Java client are documented in
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # 7,196 tests
+$ make test           # 7,360 tests
+$ make coverage       # full suite + 100% non-GUI line coverage gate
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6
 $ make build          # wheel + sdist
@@ -397,6 +399,9 @@ download, chain building (including AIA fetching over HTTP), renewal, revocation
 PKCS#12 export, the Python 3.6 fallbacks and a differential TOML parser check
 against `tomllib`. Generated `.p12` files and certificates are cross-checked with
 the `openssl` command line where available.
+
+Proxy bundles (RFC 3820) and user/host certificate definitions are documented in
+[`docs/PROXY.md`](docs/PROXY.md) and [`docs/CERTIFICATES.md`](docs/CERTIFICATES.md).
 
 For running the **real Java CertWizard** against a full local CA (persistent
 requests/certificates, RA approve/sign/reject, revocation, browser admin console

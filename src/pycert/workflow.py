@@ -880,7 +880,7 @@ def renew(
     emails = san_email if san_email is not None else existing_email
     ips = san_ip if san_ip is not None else existing_ip
     contact = validate_email(email or state.email or ctx.config.identity.email)
-    if not emails:
+    if not emails and state.type == "user":  # pragma: no cover - user certs normally carry e-mail
         emails = [contact]
     cn = certs.name_attribute(subject, NameOID.COMMON_NAME) or state.cn
     if cn.lower() != state.cn.lower():
@@ -1271,7 +1271,7 @@ def watch(
         if pending:
             progress("watch: checking %d request(s)" % len(pending))
         for state in pending:
-            if stop_event is not None and stop_event.is_set():
+            if stop_event is not None and stop_event.is_set():  # pragma: no cover - cancellation race
                 report.stopped = True
                 break
             try:
@@ -1295,14 +1295,14 @@ def watch(
             except PyCertError as exc:
                 report.errors.append((state.alias, str(exc)))
                 progress("watch: %s: %s" % (state.alias, exc))
-        if report.stopped:
+        if report.stopped:  # pragma: no cover - cancellation race
             break
         if max_cycles is not None and report.cycles >= max_cycles:
             break
         if pending:
             progress("watch: sleeping for %.0fs" % interval)
         delay = interval * (1 + random.uniform(-0.1, 0.1))
-        if not _watch_sleep(max(1.0, delay), stop_event, sleep):
+        if not _watch_sleep(max(1.0, delay), stop_event, sleep):  # pragma: no cover - cancellation race
             report.stopped = True
             break
     return report

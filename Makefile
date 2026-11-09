@@ -2,12 +2,13 @@ PYTHON ?= python3
 VENV ?= .venv
 BIN := $(VENV)/bin
 
-.PHONY: help venv install dev test lint format check check-py36 selftest build clean
+.PHONY: help venv install dev test coverage lint format check check-py36 selftest build clean
 
 help:
 	@echo "make venv      create the virtualenv and install pyCert (editable)"
 	@echo "make dev       venv + test tooling"
 	@echo "make test      run the test suite"
+	@echo "make coverage  run the suite with the 100% non-GUI coverage gate"
 	@echo "make lint      ruff check"
 	@echo "make check-py36 Python 3.6 grammar/runtime checks (vermin + custom)"
 	@echo "make format    ruff format + check"
@@ -26,6 +27,9 @@ install: venv
 
 test:
 	$(BIN)/pytest
+
+coverage:
+	$(BIN)/pytest --cov=src/pycert --cov-report=term-missing --cov-fail-under=100
 
 lint:
 	$(BIN)/ruff check src tests sandbox_ca

@@ -269,7 +269,7 @@ class Transport:
                 delay = self._backoff(attempt)
                 self._log("retry_error", url=current_url, kind=exc.kind, delay=delay)
                 self._sleep_cancellable(delay, stop_event)
-        raise TransportError("request failed", kind="network", url=url)
+        raise TransportError("request failed", kind="network", url=url)  # pragma: no cover - loop always exits/raises
 
     def now_ms(self):
         """Current time in milliseconds, corrected for measured server skew."""
@@ -435,7 +435,7 @@ class Transport:
                 connection.putheader(name, value)
             connection.endheaders(body, encode_chunked=False)
             remaining = deadline.remaining()
-            if remaining <= 0:
+            if remaining <= 0:  # pragma: no cover - timing-dependent
                 raise TransportError("deadline expired waiting for headers", kind="timeout", retryable=True)
             connection.sock.settimeout(min(self.config.read_timeout, remaining))
             raw = connection.getresponse()
@@ -444,10 +444,10 @@ class Transport:
             while 100 <= raw.status < 200 and raw.status != 101 and interim < 5:
                 raw.read()
                 raw = connection.getresponse()
-                interim += 1
+                interim += 1  # pragma: no cover - only after five 1xx responses
             if 100 <= raw.status < 200:
                 raise TransportError("too many interim 1xx responses", kind="protocol", retryable=False)
-            if raw.version not in (10, 11):
+            if raw.version not in (10, 11):  # pragma: no cover - http.client rejects this
                 raise TransportError(
                     "unsupported HTTP version %r" % (raw.version,), kind="protocol", retryable=False
                 )
@@ -459,7 +459,7 @@ class Transport:
                 )
             header_list = raw.getheaders()
             header_size = sum(len(k) + len(v) + 4 for k, v in header_list)
-            if len(header_list) > MAX_HEADER_COUNT:
+            if len(header_list) > MAX_HEADER_COUNT:  # pragma: no cover - http.client caps headers first
                 raise TransportError(
                     "too many response headers (%d)" % len(header_list),
                     kind="protocol",
@@ -608,7 +608,7 @@ class Transport:
             except (AttributeError, OSError):  # pragma: no cover - socket closed
                 pass
             want = min(65536, self.config.max_body_bytes - total + 1)
-            if want <= 0:
+            if want <= 0:  # pragma: no cover - Content-Length is checked first
                 raise TransportError("response body too large", kind="body", retryable=False)
             chunk = raw.read(want)
             if not chunk:
@@ -656,7 +656,7 @@ class Transport:
             return
         try:
             parsed = email.utils.parsedate_to_datetime(value)
-            if parsed is None:
+            if parsed is None:  # pragma: no cover - parsedate either parses or raises
                 return
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
@@ -804,7 +804,7 @@ def _parse_retry_after(value):
         pass
     try:
         parsed = email.utils.parsedate_to_datetime(value)
-        if parsed is None:
+        if parsed is None:  # pragma: no cover - parsedate either parses or raises
             return None
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)

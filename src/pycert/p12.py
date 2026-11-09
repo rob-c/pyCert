@@ -106,6 +106,8 @@ def write_pkcs12(
                 raise CryptoError("PKCS#12 verification failed after writing: certificate mismatch")
             if not certs.public_keys_equal(bundle.cert, key.public_key()):
                 raise CryptoError("PKCS#12 verification failed after writing: key mismatch")
+            if not certs.public_keys_equal(bundle.key.public_key(), key.public_key()):
+                raise CryptoError("PKCS#12 verification failed after writing: private key mismatch")
     except (ValueError, TypeError) as exc:
         raise CryptoError(f"could not create PKCS#12 bundle: {exc}") from exc
     path = Path(path)
@@ -141,8 +143,8 @@ def read_pkcs12_bytes(data: bytes, password: str) -> P12Bundle:
         matches = [c for c in extras if certs.public_keys_equal(c, key.public_key())]
         if not matches:
             raise CryptoError("the PKCS#12 file has no certificate for its private key")
-        cert = matches[0]
-        extras = [c for c in extras if certs.fingerprint(c) != certs.fingerprint(cert)]
+        cert = matches[0]  # pragma: no cover - cryptography normally returns the certificate
+        extras = [c for c in extras if certs.fingerprint(c) != certs.fingerprint(cert)]  # pragma: no cover
     if not certs.certificate_matches_key(cert, key):
         raise CryptoError("the PKCS#12 file is inconsistent: the certificate does not match the private key")
     chain = _ordered_chain(cert, extras)

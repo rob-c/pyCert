@@ -1106,8 +1106,17 @@ class MockCA:
                     return self._send(202, ca._error_xml("could not parse the CSR"))
                 if not csr_signature_valid(request):
                     return self._send(202, ca._error_xml("CSR signature is invalid"))
-                if kind == "renew" and ca.require_email_match and not ca.email_in_csr(request, email):
-                    return self._send(202, ca._error_xml("Email does not match the CSR SAN"))
+                if kind == "renew" and ca.require_email_match:
+                    try:
+                        san = request.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+                        has_dns = bool(san.get_values_for_type(x509.DNSName))
+                    except x509.ExtensionNotFound:
+                        has_dns = False
+                    # A hosted/service certificate renewal uses a DNS SAN and
+                    # carries the contact e-mail only in the XML; a user
+                    # renewal must still have its e-mail in the SAN.
+                    if not has_dns and not ca.email_in_csr(request, email):
+                        return self._send(202, ca._error_xml("Email does not match the CSR SAN"))
 
                 auth_cert = ca._find_auth_cert(
                     self.headers.get("serial"), public_key or None, self.headers.get("id")

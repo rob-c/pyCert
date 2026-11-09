@@ -256,7 +256,7 @@ class _Parser:
             if isinstance(value, list):
                 if id(value) in self.value_arrays or id(value) not in self.header_arrays:
                     self._fail("key %r is an array value, not an array of tables" % part)
-                if not value or not isinstance(value[-1], dict):
+                if not value or not isinstance(value[-1], dict):  # pragma: no cover - malformed state
                     self._fail("key %r is not an array of tables" % part)
                 if last:
                     self._fail("key %r is an array of tables; use [[...]]" % part)

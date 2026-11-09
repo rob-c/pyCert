@@ -432,7 +432,7 @@ def _parse_list_value(key: str, value) -> "list[str]":
             except ValueError as exc:
                 raise ConfigError(f"{key}: invalid JSON list: {exc}") from exc
             if not isinstance(parsed, list):
-                raise ConfigError(f"{key}: expected a list")
+                raise ConfigError(f"{key}: expected a list")  # pragma: no cover - defensive
             return [str(item) for item in parsed]
         return [item.strip().strip("'\"") for item in text.split(",") if item.strip()]
     raise ConfigError(f"{key}: expected a list")

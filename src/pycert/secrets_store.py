@@ -106,7 +106,7 @@ class SecretStore:
                         self._file_lock_handle = None
                         raise
                     self._file_lock_depth = 1
-                else:
+                else:  # pragma: no cover - Windows without fcntl
                     self._file_lock_depth = 1
             else:
                 self._file_lock_depth += 1

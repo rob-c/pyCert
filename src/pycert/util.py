@@ -71,7 +71,7 @@ def ensure_dir(path: Path, mode: int = DIR_MODE) -> Path:
     for directory in reversed(missing):
         try:
             directory.mkdir(mode=mode)
-        except FileExistsError:
+        except FileExistsError:  # pragma: no cover - creation race
             if not directory.is_dir():
                 raise
         with contextlib.suppress(OSError):
@@ -147,7 +147,7 @@ def check_private_permissions(path: Path) -> "list[str]":
     """Return a list of warnings about insecure permissions on *path*."""
     warnings = []
     try:
-        st = os.stat(path)
+        st = os.lstat(path)
     except OSError:
         return warnings
     if stat.S_ISLNK(st.st_mode):

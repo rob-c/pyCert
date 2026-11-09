@@ -26,6 +26,7 @@ from . import __version__, certs
 from .compat import merge_dicts
 from .config import ConfigError, init_config, load_config, write_config
 from .errors import ChainError, PyCertError, TimeoutWaiting
+from .proxy import create_proxy_bundle
 from .secrets_store import SecretStore, generate_secret
 from .store import PENDING_STATUSES, RequestState
 from .util import parse_duration
@@ -794,9 +795,9 @@ def cmd_renew(args) -> int:
             rsa_bits=args.rsa_bits,
             ec_curve=args.ec_curve,
             email=args.email,
-            san_dns=args.san_dns,
-            san_email=args.san_email,
-            san_ip=args.san_ip,
+            san_dns=[] if args.clear_san_dns else args.san_dns,
+            san_email=[] if args.clear_san_email else args.san_email,
+            san_ip=[] if args.clear_san_ip else args.san_ip,
         )
         payload = {
             "dry_run": args.dry_run,
@@ -845,9 +846,9 @@ def cmd_renew(args) -> int:
         rsa_bits=args.rsa_bits,
         ec_curve=args.ec_curve,
         email=args.email,
-        san_dns=args.san_dns,
-        san_email=args.san_email,
-        san_ip=args.san_ip,
+        san_dns=[] if args.clear_san_dns else args.san_dns,
+        san_email=[] if args.clear_san_email else args.san_email,
+        san_ip=[] if args.clear_san_ip else args.san_ip,
         pin=pin,
     )
     payload = {
@@ -864,6 +865,37 @@ def cmd_renew(args) -> int:
         console.info(f"Renewal for '{state.alias}' is {state.status}.")
         if state.renewal:
             console.info(f"Run 'pycert wait {state.alias}' once the RA has approved it.")
+    return 0
+
+
+def cmd_proxy(args) -> int:
+    """Create a short-lived RFC 3820 proxy bundle from a stored certificate."""
+    console = Console(json_mode=args.json, quiet=args.quiet)
+    ctx = _context(args)
+    state = ctx.store.get(args.alias)
+    out = Path(args.out).expanduser() if args.out else ctx.store.path(state) / "proxy.pem"
+    password = _read_secret_option(
+        args, what="proxy key password", prompt_label="Proxy key password", required=False
+    )
+    result = create_proxy_bundle(
+        ctx,
+        args.alias,
+        out,
+        hours=args.hours,
+        path_length=args.path_length,
+        limited=args.limited,
+        rsa_bits=args.rsa_bits,
+        password=password,
+        remove=args.remove,
+    )
+    if args.json:
+        print(json.dumps(result.as_dict(), indent=2, default=str))
+    else:
+        action = "created and removed" if result.removed else "created"
+        console.info(f"Proxy bundle {action}: {result.path}")
+        console.info(f"  subject:   {result.subject}")
+        console.info(f"  issuer:    {result.issuer}")
+        console.info(f"  valid:     {result.not_before} .. {result.not_after}")
     return 0
 
 
@@ -1263,6 +1295,9 @@ def build_parser() -> argparse.ArgumentParser:
     renew_cmd.add_argument("--san-dns", action="append")
     renew_cmd.add_argument("--san-email", action="append")
     renew_cmd.add_argument("--san-ip", action="append")
+    renew_cmd.add_argument("--clear-san-dns", action="store_true", help="drop all DNS SANs")
+    renew_cmd.add_argument("--clear-san-email", action="store_true", help="drop all e-mail SANs")
+    renew_cmd.add_argument("--clear-san-ip", action="store_true", help="drop all IP SANs")
     renew_cmd.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     _add_pin_options(renew_cmd)
     _add_wait_options(renew_cmd)
@@ -1299,6 +1334,22 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--encrypt-key", action="store_true", help="encrypt userkey.pem")
     install.add_argument("--with-chain", action="store_true", help="append issuers to usercert.pem")
     install.set_defaults(func=cmd_install)
+
+    proxy = sub.add_parser("proxy", help="create a short-lived RFC 3820 proxy bundle")
+    _add_common(proxy, suppress=True)
+    proxy.add_argument("alias", help="stored certificate to delegate from")
+    proxy.add_argument("--out", help="output PEM bundle (default: request directory/proxy.pem)")
+    proxy.add_argument("--hours", type=int, default=12, help="proxy lifetime in hours (default 12)")
+    proxy.add_argument("--path-length", type=int, help="RFC 3820 path length constraint")
+    proxy.add_argument("--limited", action="store_true", help="use the limited-proxy policy")
+    proxy.add_argument("--rsa-bits", type=int, default=2048, help="proxy key size (default 2048)")
+    proxy.add_argument(
+        "--remove",
+        action="store_true",
+        help="verify the bundle and immediately remove it",
+    )
+    _add_password_options(proxy)
+    proxy.set_defaults(func=cmd_proxy)
 
     secret = sub.add_parser("secret", help="manage the saved PKCS#12 passphrase")
     _add_common(secret, suppress=True)

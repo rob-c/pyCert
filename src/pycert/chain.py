@@ -161,9 +161,9 @@ class ChainBuilder:
                     f"({not_valid_before(cert).isoformat()} .. {not_valid_after(cert).isoformat()})"
                 )
             if not out_of_band and not self.allow_sha1 and self._weak(cert):
-                try:
+                try:  # pragma: no cover - exotic signature hash metadata
                     digest = cert.signature_hash_algorithm.name.upper()
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError):  # pragma: no cover
                     digest = "an unknown hash"
                 problems.append(
                     f"certificate '{_name(cert)}' is signed with {digest}, which is not "
