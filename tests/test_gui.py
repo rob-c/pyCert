@@ -139,6 +139,7 @@ def test_gui_inspects_java_certificate_bundle(config, issued, tmp_path, monkeypa
         assert "BEGIN CERTIFICATE" in details
         assert "Subject" in details
         assert "private key" in dialog.summary_label.cget("text")
+        assert "3 certificate" in app.bundle_status.cget("text")
         assert str(dialog.save_java_button.cget("state")) == "normal"
         assert str(dialog.update_button.cget("state")) == "normal"
 
@@ -211,3 +212,23 @@ def test_system_dark_mode_override(monkeypatch):
     assert gui._detect_system_dark() is False
     monkeypatch.setenv("PYCERT_THEME", "system")
     assert gui._initial_appearance_mode() == "system"
+
+
+def test_gui_bundle_tab_is_visible_without_requests(config):
+    app = _app(config)
+    try:
+        assert app.notebook.tab(app.bundle_tab, "text") == "Java bundle"
+        assert app.notebook.tab(app.notebook.select(), "text") == "Java bundle"
+        def texts(widget):
+            values = []
+            for child in widget.winfo_children():
+                try:
+                    values.append(child.cget("text"))
+                except Exception:
+                    pass
+                values.extend(texts(child))
+            return values
+
+        assert "Open old Java bundle..." in texts(app.bundle_tab)
+    finally:
+        app.destroy()

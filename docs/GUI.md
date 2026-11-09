@@ -105,8 +105,12 @@ download, export, renewal, revocation, with timestamps and details.
 
 ### Inspecting a legacy Java bundle
 
-**Bundles → Open old Java bundle...**, **File → Open old Java bundle...**, or
-the **Java bundle...** toolbar button opens a viewer for:
+The **Java bundle** tab on the right is a permanent starting point with
+**Open old Java bundle...**, **Save all certs (PEM)...**, **Save all certs
+(Java PKCS#12)...** and **Update open Java bundle...** buttons. The same actions
+are available from **Bundles**, **File → Open old Java bundle...**, the
+**Java bundle...** toolbar button, or `Cmd/Ctrl+B`. The tab or button opens a
+viewer for:
 
 * CertWizard `cakeystore.pkcs12` / `.p12` / `.pfx` files;
 * Java JKS and JCEKS trust stores (`.jks`, `.keystore`, `.jceks`);

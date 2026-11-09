@@ -194,9 +194,9 @@ The GUI can open a legacy CertWizard PKCS#12 file, a Java JKS/JCEKS trust
 store, or a PEM/DER certificate bundle without importing it first:
 
 1. Start `pycert gui`.
-2. Choose **Bundles → Open old Java bundle...**, **File → Open old Java
-   bundle...**, or click the prominent **Java bundle...** button on the main
-   toolbar (shortcut `Cmd/Ctrl+B`).
+2. Open the **Java bundle** tab on the right, choose **Bundles → Open old Java
+   bundle...**, **File → Open old Java bundle...**, or click the prominent
+   **Java bundle...** button on the main toolbar (shortcut `Cmd/Ctrl+B`).
 3. Select the file and enter its passphrase if required.
 4. Every certificate is listed with its role (`leaf`, `chain`, `trusted` or
    `certificate`), subject, issuer, expiry, key, SHA-256 fingerprint and alias.
@@ -643,7 +643,7 @@ use Python 3.9+ for new deployments.
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # full test suite (7,396 tests)
+$ make test           # full test suite (7,397 tests)
 $ make coverage       # full suite + 100% non-GUI line coverage gate
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6

@@ -1298,6 +1298,8 @@ class BundleDialog(tk.Toplevel):
     def _on_destroy(self, _event=None) -> None:
         if getattr(self.parent, "_bundle_dialog", None) is self:
             self.parent._bundle_dialog = None
+            if hasattr(self.parent, "_update_bundle_status"):
+                self.parent._update_bundle_status(None)
 
     def _toggle_password(self) -> None:
         self.password_entry.configure(show="" if self.show_password.get() else "*")
@@ -1335,6 +1337,8 @@ class BundleDialog(tk.Toplevel):
         self._loaded_password = self.password_var.get()
         self._populate()
         self._status(self._summary(bundle))
+        if hasattr(self.parent, "_update_bundle_status"):
+            self.parent._update_bundle_status(bundle)
 
     def _populate(self) -> None:
         for item in self.tree.get_children():
@@ -2030,6 +2034,7 @@ class PyCertApp(tk.Tk):
         )
         self.notebook.add(overview, text="Overview")
 
+
         cert_tab = ttk.Frame(self.notebook, padding=6)
         self.cert_text, _scroll, frame = _readonly_text(cert_tab, height=20)
         frame.pack(fill="both", expand=True)
@@ -2039,6 +2044,62 @@ class PyCertApp(tk.Tk):
         self.history_text, _scroll2, frame2 = _readonly_text(history_tab, height=20)
         frame2.pack(fill="both", expand=True)
         self.notebook.add(history_tab, text="History")
+
+        self.bundle_tab = ttk.Frame(self.notebook, padding=18)
+        self.bundle_tab.columnconfigure(0, weight=1)
+        ttk.Label(
+            self.bundle_tab,
+            text="Java certificate bundles",
+            font=("TkDefaultFont", 15, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            self.bundle_tab,
+            text=(
+                "Open CertWizard's cakeystore.pkcs12, a Java JKS/JCEKS trust "
+                "store, or a PEM/DER bundle.\n"
+                "Every certificate is listed in the bundle window. Save all "
+                "certificates, write a Java-compatible PKCS#12, or update the "
+                "open bundle in place."
+            ),
+            style="Subtle.TLabel",
+            justify="left",
+            wraplength=650,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 14))
+        bundle_buttons = ttk.Frame(self.bundle_tab)
+        bundle_buttons.grid(row=2, column=0, sticky="w")
+        ttk.Button(
+            bundle_buttons, text="Open old Java bundle...", command=self.inspect_bundle_dialog
+        ).pack(side="left")
+        ttk.Button(
+            bundle_buttons,
+            text="Save all certs (PEM)...",
+            command=lambda: self._bundle_action("_save_all"),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            bundle_buttons,
+            text="Save all certs (Java PKCS#12)...",
+            command=lambda: self._bundle_action("_save_java"),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            bundle_buttons,
+            text="Update open Java bundle...",
+            command=lambda: self._bundle_action("_update_bundle"),
+        ).pack(side="left", padx=(8, 0))
+        self.bundle_status = ttk.Label(
+            self.bundle_tab,
+            text="No Java bundle is open.",
+            style="Subtle.TLabel",
+            wraplength=650,
+            justify="left",
+        )
+        self.bundle_status.grid(row=3, column=0, sticky="w", pady=(18, 0))
+        ttk.Label(
+            self.bundle_tab,
+            text="Tip: Cmd/Ctrl+B opens the same dialog from anywhere.",
+            style="Subtle.TLabel",
+        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
+        self.notebook.add(self.bundle_tab, text="Java bundle")
+
         paned.add(right, weight=5)
 
     def _build_log(self) -> None:
@@ -2210,6 +2271,8 @@ class PyCertApp(tk.Tk):
             label.configure(text="")
         self.overview_labels["status"].configure(text="No certificate requests yet")
         _set_text(self.cert_text, "Use File -> New request to create your first certificate.")
+        if hasattr(self, "bundle_tab"):
+            self.notebook.select(self.bundle_tab)
         _set_text(self.history_text, "")
 
     def _on_select(self, _event=None) -> None:
@@ -2546,6 +2609,26 @@ class PyCertApp(tk.Tk):
         if path:
             dialog = BundleDialog(self, Path(path))
             self._bundle_dialog = dialog
+
+    def _update_bundle_status(self, bundle) -> None:
+        if not hasattr(self, "bundle_status"):
+            return
+        try:
+            if not self.bundle_status.winfo_exists():
+                return
+            if bundle is None:
+                self.bundle_status.configure(text="No Java bundle is open.")
+            else:
+                self.bundle_status.configure(
+                    text="Open: %s\n%d certificate(s); %s"
+                    % (
+                        bundle.path,
+                        len(bundle),
+                        bundle.key_description or "no private key",
+                    )
+                )
+        except tk.TclError:  # pragma: no cover - window is closing
+            pass
 
     def _bundle_action(self, method: str) -> None:
         dialog = self._bundle_dialog
