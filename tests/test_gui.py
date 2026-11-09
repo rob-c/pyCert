@@ -111,7 +111,7 @@ def test_gui_dialogs_build(config, issued):
 pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 
 
-def test_gui_inspects_java_certificate_bundle(config, issued, tmp_path):
+def test_gui_inspects_java_certificate_bundle(config, issued, tmp_path, monkeypatch):
     from pycert import p12
 
     state = issued("bundle gui")
@@ -139,6 +139,21 @@ def test_gui_inspects_java_certificate_bundle(config, issued, tmp_path):
         assert "BEGIN CERTIFICATE" in details
         assert "Subject" in details
         assert "private key" in dialog.summary_label.cget("text")
+        assert str(dialog.save_java_button.cget("state")) == "normal"
+        assert str(dialog.update_button.cget("state")) == "normal"
+
+        from pycert import gui
+
+        target = tmp_path / "saved-java.p12"
+        monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda *a, **k: str(target))
+        monkeypatch.setattr(gui.simpledialog, "askstring", lambda *a, **k: "new-secret")
+        dialog._save_java()
+        assert target.is_file()
+        assert str(dialog.update_button.cget("state")) == "normal"
+
+        monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **k: True)
+        dialog._update_bundle()
+        assert (path.parent / (path.name + ".bak")).is_file()
         dialog.destroy()
     finally:
         app.destroy()

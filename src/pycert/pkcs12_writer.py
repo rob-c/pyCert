@@ -23,12 +23,18 @@ from cryptography.hazmat.primitives import padding, serialization
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+try:  # cryptography >= 48 moved 3DES to the decrepit namespace
+    from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
+except ImportError:  # pragma: no cover - older cryptography (including 3.3)
+    from cryptography.hazmat.primitives.ciphers.algorithms import TripleDES
+
 from . import asn1
 
 DATA_OID = "1.2.840.113549.1.7.1"
 ENCRYPTED_DATA_OID = "1.2.840.113549.1.7.6"
 PBES2_OID = "1.2.840.113549.1.5.13"
 PBKDF2_OID = "1.2.840.113549.1.5.12"
+PBE_SHA1_3DES_OID = "1.2.840.113549.1.12.1.3"
 HMAC_SHA256_OID = "1.2.840.113549.2.9"
 HMAC_SHA1_OID = "1.2.840.113549.2.7"
 AES256_CBC_OID = "2.16.840.1.101.3.4.1.42"
@@ -121,6 +127,23 @@ def _pbes2_encrypt(plaintext, password, iterations):
     return algorithm, ciphertext
 
 
+def _pbe_sha1_3des_encrypt(plaintext, password, iterations):
+    """Legacy PBE-SHA1-3DES encryption understood by old Java keytool/CertWizard."""
+    salt = os.urandom(8)
+    password_bytes = _bmp_password(password)
+    key = pkcs12_kdf(password_bytes, salt, 1, iterations, 24, "sha1")
+    iv = pkcs12_kdf(password_bytes, salt, 2, iterations, 8, "sha1")
+    padder = padding.PKCS7(64).padder()
+    padded = padder.update(plaintext) + padder.finalize()
+    encryptor = Cipher(TripleDES(key), modes.CBC(iv)).encryptor()
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+    algorithm = asn1.seq(
+        asn1.oid(PBE_SHA1_3DES_OID),
+        asn1.seq(asn1.octet_string(salt), asn1.integer(iterations)),
+    )
+    return algorithm, ciphertext
+
+
 def _attributes(friendly_name, local_key_id=None):
     attributes = []
     if friendly_name:
@@ -140,13 +163,16 @@ def _certificate_bag(certificate, friendly_name, local_key_id, with_key_id):
     )
 
 
-def _key_bag(key, password, iterations, friendly_name, local_key_id):
+def _key_bag(key, password, iterations, friendly_name, local_key_id, legacy=False):
     key_der = key.private_bytes(
         serialization.Encoding.DER,
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    algorithm, ciphertext = _pbes2_encrypt(key_der, password, iterations)
+    if legacy:
+        algorithm, ciphertext = _pbe_sha1_3des_encrypt(key_der, password, iterations)
+    else:
+        algorithm, ciphertext = _pbes2_encrypt(key_der, password, iterations)
     encrypted_private_key = asn1.seq(algorithm, asn1.octet_string(ciphertext))
     return asn1.seq(
         asn1.oid(PKCS8_SHROUDED_KEY_BAG_OID),
@@ -164,12 +190,20 @@ def encode_pkcs12(
     iterations=DEFAULT_ITERATIONS,
     mac_iterations=DEFAULT_MAC_ITERATIONS,
     mac_hash="sha256",
+    legacy=False,
 ):
-    """Return the DER encoding of a PKCS#12 PFX containing key, leaf and chain."""
+    """Return the DER encoding of a PKCS#12 PFX containing key, leaf and chain.
+
+    ``legacy=True`` selects PBE-SHA1-3DES and an HMAC-SHA-1 MAC, the
+    combination old Java keytool/CertWizard releases understand.  The default
+    remains modern PBES2/AES-256 for pyCert's own bundles.
+    """
     if not password:
         raise ValueError("password required")
     if iterations < 1 or mac_iterations < 1:
         raise ValueError("iteration counts must be positive")
+    if legacy:
+        mac_hash = "sha1"
     hash_function, mac_oid, mac_length = _hash_algorithm(mac_hash)
 
     chain = list(chain or [])
@@ -191,8 +225,13 @@ def encode_pkcs12(
     cert_content_info = asn1.seq(asn1.oid(DATA_OID), asn1.explicit(0, asn1.octet_string(cert_safe_contents)))
 
     # The key lives in a shrouded bag inside an extra encrypted SafeContents.
-    key_safe_contents = asn1.seq(_key_bag(key, password, iterations, friendly_name, local_key_id))
-    algorithm, encrypted_contents = _pbes2_encrypt(key_safe_contents, password, iterations)
+    key_safe_contents = asn1.seq(
+        _key_bag(key, password, iterations, friendly_name, local_key_id, legacy=legacy)
+    )
+    if legacy:
+        algorithm, encrypted_contents = _pbe_sha1_3des_encrypt(key_safe_contents, password, iterations)
+    else:
+        algorithm, encrypted_contents = _pbes2_encrypt(key_safe_contents, password, iterations)
     encrypted_content_info = asn1.seq(asn1.oid(DATA_OID), algorithm, asn1.implicit(0, encrypted_contents))
     encrypted_data = asn1.seq(asn1.integer(0), encrypted_content_info)
     key_content_info = asn1.seq(asn1.oid(ENCRYPTED_DATA_OID), asn1.explicit(0, encrypted_data))
@@ -212,4 +251,93 @@ def encode_pkcs12(
         # MacData.iterations has DEFAULT 1 and DER omits default values.
         mac_parts.append(asn1.integer(mac_iterations))
     mac_data = asn1.seq(*mac_parts)
+    return asn1.seq(asn1.integer(3), auth_safe, mac_data)
+
+
+def _mac_data(authenticated_safe, password, mac_iterations, mac_hash):
+    hash_function, mac_oid, mac_length = _hash_algorithm(mac_hash)
+    mac_salt = os.urandom(16)
+    mac_key = pkcs12_kdf(_bmp_password(password), mac_salt, 3, mac_iterations, mac_length, mac_hash)
+    mac = stdlib_hmac.new(mac_key, authenticated_safe, hash_function).digest()
+    mac_parts = [
+        asn1.seq(asn1.seq(asn1.oid(mac_oid), asn1.null()), asn1.octet_string(mac)),
+        asn1.octet_string(mac_salt),
+    ]
+    if mac_iterations != 1:
+        mac_parts.append(asn1.integer(mac_iterations))
+    return asn1.seq(*mac_parts)
+
+
+def encode_certificate_bundle(
+    certificates,
+    password,
+    friendly_name="",
+    iterations=DEFAULT_ITERATIONS,
+    mac_iterations=DEFAULT_MAC_ITERATIONS,
+    mac_hash="sha256",
+    legacy=False,
+):
+    """Write a certificate-only PKCS#12 (no private key).
+
+    This is useful when a legacy Java bundle is only a truststore, or when the
+    caller wants to save every decoded certificate without importing a key.
+    """
+    if not password:
+        raise ValueError("password required")
+    if iterations < 1 or mac_iterations < 1:
+        raise ValueError("iteration counts must be positive")
+    if legacy:
+        mac_hash = "sha1"
+    certificates = list(certificates)
+    if not certificates:
+        raise ValueError("at least one certificate is required")
+    cert_bags = [
+        _certificate_bag(
+            cert,
+            (friendly_name or "certificate") if index == 0 else "%s-%d" % (friendly_name or "certificate", index),
+            None,
+            with_key_id=False,
+        )
+        for index, cert in enumerate(certificates)
+    ]
+    cert_safe_contents = asn1.seq(*cert_bags)
+    cert_content_info = asn1.seq(asn1.oid(DATA_OID), asn1.explicit(0, asn1.octet_string(cert_safe_contents)))
+    authenticated_safe = asn1.seq(cert_content_info)
+    auth_safe = asn1.seq(asn1.oid(DATA_OID), asn1.explicit(0, asn1.octet_string(authenticated_safe)))
+    mac_data = _mac_data(authenticated_safe, password, mac_iterations, mac_hash)
+    return asn1.seq(asn1.integer(3), auth_safe, mac_data)
+
+
+def encode_raw_pkcs12(
+    key_bags,
+    cert_bags,
+    password,
+    *,
+    mac_iterations=DEFAULT_MAC_ITERATIONS,
+    mac_hash="sha1",
+):
+    """Reassemble raw Java SafeBags into a PKCS#12 PFX.
+
+    The key bags remain individually encrypted (with their original
+    passphrase); certificate bags are public data.  This preserves all Java
+    key entries, aliases and localKeyIDs without decrypting private keys.
+    """
+    if not password:
+        raise ValueError("password required")
+    if mac_iterations < 1:
+        raise ValueError("MAC iterations must be positive")
+    key_bags = list(key_bags or [])
+    cert_bags = list(cert_bags or [])
+    if not cert_bags:
+        raise ValueError("at least one certificate bag is required")
+    cert_safe_contents = asn1.seq(*cert_bags)
+    cert_content_info = asn1.seq(asn1.oid(DATA_OID), asn1.explicit(0, asn1.octet_string(cert_safe_contents)))
+    authenticated_parts = [cert_content_info]
+    if key_bags:
+        key_safe_contents = asn1.seq(*key_bags)
+        key_content_info = asn1.seq(asn1.oid(DATA_OID), asn1.explicit(0, asn1.octet_string(key_safe_contents)))
+        authenticated_parts.append(key_content_info)
+    authenticated_safe = asn1.seq(*authenticated_parts)
+    auth_safe = asn1.seq(asn1.oid(DATA_OID), asn1.explicit(0, asn1.octet_string(authenticated_safe)))
+    mac_data = _mac_data(authenticated_safe, password, mac_iterations, mac_hash)
     return asn1.seq(asn1.integer(3), auth_safe, mac_data)

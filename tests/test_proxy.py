@@ -302,3 +302,8 @@ def test_proxy_generated_certificate_mismatch_is_rejected(tmp_path, ctx, issued,
     with pytest.raises(CryptoError):
         create_proxy_bundle(ctx, state.alias, tmp_path / "mismatch.pem")
     monkeypatch.setattr(proxy_module.certs, "certificate_matches_key", real)
+
+
+def test_load_proxy_bundle_missing_file(tmp_path):
+    with pytest.raises(NotFound):
+        load_proxy_bundle(tmp_path / "missing-proxy.pem")

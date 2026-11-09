@@ -12,7 +12,7 @@ from cryptography.x509.oid import NameOID
 
 from pycert import certs
 from pycert import p12 as p12_module
-from pycert.errors import CryptoError
+from pycert.errors import CryptoError, PyCertError
 from pycert.pkcs12_writer import (
     DEFAULT_ITERATIONS,
     _bmp_password,
@@ -197,3 +197,218 @@ def test_mac_hash_unknown():
     leaf = certificate(private_key)
     with pytest.raises(ValueError):
         encode_pkcs12(private_key, leaf, [], "pw", mac_hash="md5")
+
+
+def test_legacy_writer_roundtrip_and_oid(tmp_path):
+    private_key = key("rsa")
+    leaf = certificate(private_key, "legacy leaf")
+    path = tmp_path / "legacy.p12"
+    p12_module.write_pkcs12(
+        path,
+        key=private_key,
+        certificate=leaf,
+        chain=[],
+        password="legacy-password",
+        legacy=True,
+        iterations=2000,
+        mac_iterations=500,
+    )
+    data = path.read_bytes()
+    assert bytes.fromhex("2a864886f70d010c0103") in data  # PBE-SHA1-3DES OID
+    bundle = p12_module.read_pkcs12(path, "legacy-password")
+    assert certs.fingerprint(bundle.cert) == certs.fingerprint(leaf)
+
+
+def test_certificate_only_pkcs12_roundtrip(tmp_path):
+    root_key = key()
+    root = certificate(root_key, "root", ca=True)
+    leaf_key = key()
+    leaf = certificate(leaf_key, "leaf", issuer=root, issuer_key=root_key)
+    path = tmp_path / "certs.p12"
+    p12_module.write_certificate_bundle(
+        path,
+        certificates=[leaf, root],
+        password="certs-password",
+        legacy=True,
+        iterations=2000,
+        mac_iterations=500,
+    )
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    key_value, cert_value, extras = pkcs12.load_key_and_certificates(path.read_bytes(), b"certs-password")
+    assert key_value is None
+    assert cert_value is None
+    assert {certs.fingerprint(c) for c in extras} == {certs.fingerprint(leaf), certs.fingerprint(root)}
+
+
+def test_certificate_only_writer_validation(tmp_path):
+    with pytest.raises(PyCertError):
+        p12_module.write_certificate_bundle(tmp_path / "x.p12", certificates=[], password="x")
+    with pytest.raises(PyCertError):
+        p12_module.write_certificate_bundle(tmp_path / "x.p12", certificates=[], password="")
+    leaf_key = key()
+    leaf = certificate(leaf_key, "leaf")
+    path = tmp_path / "x.p12"
+    original = p12_module.pkcs12.load_key_and_certificates
+    p12_module.pkcs12.load_key_and_certificates = lambda *a, **k: (leaf_key, leaf, [])
+    try:
+        with pytest.raises(CryptoError):
+            p12_module.write_certificate_bundle(path, certificates=[leaf], password="x")
+    finally:
+        p12_module.pkcs12.load_key_and_certificates = original
+
+
+def test_preserve_unrelated_chain_certificate(tmp_path):
+    leaf_key = key()
+    leaf = certificate(leaf_key, "leaf")
+    other_key = key()
+    other = certificate(other_key, "other")
+    path = tmp_path / "preserved.p12"
+    p12_module.write_pkcs12(
+        path,
+        key=leaf_key,
+        certificate=leaf,
+        chain=[other],
+        password="x-password",
+        preserve_chain=True,
+        iterations=2000,
+        mac_iterations=500,
+    )
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    _key, _cert, extras = pkcs12.load_key_and_certificates(path.read_bytes(), b"x-password")
+    assert extras and certs.fingerprint(extras[0]) == certs.fingerprint(other)
+
+
+def test_certificate_only_writer_verification_failures(tmp_path, monkeypatch):
+    leaf_key = key()
+    leaf = certificate(leaf_key, "leaf")
+    path = tmp_path / "x.p12"
+    monkeypatch.setattr(p12_module, "MAX_CHAIN_CERTIFICATES", 0)
+    with pytest.raises(PyCertError):
+        p12_module.write_certificate_bundle(path, certificates=[leaf], password="x")
+    monkeypatch.undo()
+    original = p12_module.pkcs12.load_key_and_certificates
+    monkeypatch.setattr(
+        p12_module.pkcs12, "load_key_and_certificates", lambda *a, **k: (leaf_key, None, [])
+    )
+    with pytest.raises(CryptoError):
+        p12_module.write_certificate_bundle(path, certificates=[leaf], password="x")
+    monkeypatch.setattr(p12_module.pkcs12, "load_key_and_certificates", original)
+
+
+def test_preserve_chain_limit(tmp_path):
+    leaf_key = key()
+    leaf = certificate(leaf_key, "leaf")
+    other_key = key()
+    other = certificate(other_key, "other")
+    from pycert import p12 as p12_module
+
+    old = p12_module.MAX_CHAIN_CERTIFICATES
+    p12_module.MAX_CHAIN_CERTIFICATES = 0
+    try:
+        with pytest.raises(PyCertError):
+            p12_module.write_pkcs12(
+                tmp_path / "x.p12",
+                key=leaf_key,
+                certificate=leaf,
+                chain=[other],
+                password="x",
+                preserve_chain=True,
+            )
+    finally:
+        p12_module.MAX_CHAIN_CERTIFICATES = old
+
+
+def test_certificate_bundle_writer_mismatch_and_encode_error(tmp_path, monkeypatch):
+    leaf_key = key()
+    leaf = certificate(leaf_key, "leaf")
+    other = certificate(key(), "other")
+    path = tmp_path / "x.p12"
+    original = p12_module.pkcs12.load_key_and_certificates
+    monkeypatch.setattr(
+        p12_module.pkcs12, "load_key_and_certificates", lambda *a, **k: (None, other, [])
+    )
+    with pytest.raises(CryptoError, match="certificate mismatch"):
+        p12_module.write_certificate_bundle(path, certificates=[leaf], password="x")
+    monkeypatch.setattr(p12_module.pkcs12, "load_key_and_certificates", original)
+    monkeypatch.setattr(
+        p12_module, "encode_certificate_bundle", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad"))
+    )
+    with pytest.raises(CryptoError, match="certificate bundle"):
+        p12_module.write_certificate_bundle(path, certificates=[leaf], password="x")
+
+
+def test_certificate_bundle_encoder_validation():
+    from pycert.pkcs12_writer import encode_certificate_bundle
+
+    with pytest.raises(ValueError, match="password"):
+        encode_certificate_bundle([], "")
+    with pytest.raises(ValueError, match="iteration"):
+        encode_certificate_bundle([], "x", iterations=0)
+    with pytest.raises(ValueError, match="at least one"):
+        encode_certificate_bundle([], "x")
+
+
+@pytest.mark.skipif(OPENSSL is None, reason="openssl CLI not available")
+def test_openssl_reads_legacy_java_profile(tmp_path):
+    private_key = key("rsa")
+    leaf = certificate(private_key, "legacy java")
+    path = tmp_path / "legacy-java.p12"
+    p12_module.write_pkcs12(
+        path,
+        key=private_key,
+        certificate=leaf,
+        chain=[],
+        password="legacy-password",
+        legacy=True,
+        iterations=2000,
+        mac_iterations=500,
+    )
+    result = subprocess.run(
+        [OPENSSL, "pkcs12", "-in", str(path), "-passin", "pass:legacy-password", "-info", "-nodes"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pbeWithSHA1And3-KeyTripleDES-CBC" in (result.stdout + result.stderr)
+
+
+def test_raw_pkcs12_writer_validation(tmp_path):
+    from pycert.pkcs12_writer import encode_raw_pkcs12
+
+    with pytest.raises(PyCertError):
+        p12_module.write_raw_pkcs12(tmp_path / "x.p12", key_bags=[], cert_bags=[], password="x")
+    with pytest.raises(PyCertError):
+        p12_module.write_raw_pkcs12(tmp_path / "x.p12", key_bags=[], cert_bags=[b"c"], password="")
+    with pytest.raises(ValueError, match="password"):
+        encode_raw_pkcs12([], [b"c"], "")
+    with pytest.raises(ValueError, match="iterations"):
+        encode_raw_pkcs12([], [b"c"], "x", mac_iterations=0)
+    with pytest.raises(ValueError, match="certificate bag"):
+        encode_raw_pkcs12([], [], "x")
+
+
+def test_raw_pkcs12_writer_roundtrip(tmp_path):
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    from pycert.pkcs12_writer import _certificate_bag, _key_bag
+
+    private_key = key("rsa")
+    leaf = certificate(private_key, "raw writer")
+    cert_bag = _certificate_bag(leaf, "raw writer", None, False)
+    key_bag = _key_bag(private_key, "raw-password", 1000, "raw writer", b"id")
+    path = tmp_path / "raw.p12"
+    p12_module.write_raw_pkcs12(
+        path,
+        key_bags=[key_bag],
+        cert_bags=[cert_bag],
+        password="raw-password",
+        mac_iterations=100,
+    )
+    key_value, cert_value, _extras = pkcs12.load_key_and_certificates(
+        path.read_bytes(), b"raw-password"
+    )
+    assert key_value is not None
+    assert cert_value is not None
+    assert certs.common_name(cert_value.subject) == "raw writer"

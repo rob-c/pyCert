@@ -46,7 +46,7 @@ This dossier sets out:
    certificate policy;
 4. the security, assurance, operations and audit work that must accompany it;
 5. an incremental migration plan that does not break CertWizard users;
-6. the test evidence already in this repository (7,372 tests at the time of
+6. the test evidence already in this repository (7,396 tests at the time of
    writing, including 3,000+ ACME/CA-emulation cases and a real certbot test);
 7. concrete certbot/nginx configurations that can be used for a pilot.
 
@@ -627,7 +627,7 @@ unchanged during the ACME rollout.
 
 ### 10.1 Current evidence in this repository
 
-- **7,372 tests** in the full suite.
+- **7,396 tests** in the full suite.
 - **3,000+ ACME/CA-emulation cases**, including:
   - routing/method matrix;
   - JWS envelope and algorithm rejection;
@@ -1230,7 +1230,7 @@ CA in a big bang”. The low-risk path is:
    service production;
 6. keep the legacy endpoints until every user has a migration path.
 
-The reference implementation and 7,372-test evidence in this repository are a
+The reference implementation and 7,396-test evidence in this repository are a
 starting point, not a production certificate authority. The next step is an
 STFC-owned service design with named owners, an approved policy and a funded
 operations model.

@@ -14,20 +14,38 @@ The private keys are never returned or displayed.
 import hashlib
 import hmac
 import struct
+import subprocess
 from pathlib import Path
 
 from cryptography import x509
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, modes
 from cryptography.hazmat.primitives.serialization import pkcs12
 
-from . import certs
+try:  # cryptography >= 48 moved legacy ciphers to the decrepit namespace
+    from cryptography.hazmat.decrepit.ciphers.algorithms import RC2, TripleDES
+except ImportError:  # pragma: no cover - older cryptography
+    try:
+        from cryptography.hazmat.primitives.ciphers.algorithms import RC2, TripleDES
+    except ImportError:  # pragma: no cover - RC2 is not in every cryptography build
+        from cryptography.hazmat.primitives.ciphers.algorithms import TripleDES
+
+        RC2 = None
+
+from . import ber, certs, p12
 from .compat import dataclass, field
 from .errors import CryptoError, PyCertError
+from .pkcs12_writer import _bmp_password, pkcs12_kdf
 
 MAX_BUNDLE_BYTES = 32 * 1024 * 1024
 MAX_BUNDLE_CERTIFICATES = 200
 JKS_MAGIC = 0xFEEDFEED
 JCEKS_MAGIC = 0xCECECECE
 _JKS_DIGEST_PREFIX = b"Mighty Aphrodite"
+
+
+class _UnsupportedPBE(CryptoError):
+    """Internal marker: let cryptography's high-level parser try this layout."""
 
 
 @dataclass
@@ -56,6 +74,11 @@ class CertificateBundle:
     key_description: str = ""
     warnings: "list[str]" = field(default_factory=list)
     integrity_checked: bool = False
+    private_key: object = field(default=None, repr=False)
+    key_count: int = 0
+    key_aliases: "list[str]" = field(default_factory=list)
+    raw_key_bags: "list[bytes]" = field(default_factory=list, repr=False)
+    raw_cert_bags: "list[bytes]" = field(default_factory=list, repr=False)
 
     def __len__(self):
         return len(self.certificates)
@@ -67,6 +90,8 @@ class CertificateBundle:
             "has_private_key": self.has_private_key,
             "key_description": self.key_description,
             "integrity_checked": self.integrity_checked,
+            "key_count": self.key_count,
+            "key_aliases": list(self.key_aliases),
             "warnings": list(self.warnings),
             "certificates": [entry.as_dict() for entry in self.certificates],
         }
@@ -127,6 +152,12 @@ def _load_pem(data: bytes, path: str) -> CertificateBundle:
 
 
 def _load_pkcs12(data: bytes, password: str, path: str) -> CertificateBundle:
+    # The raw path understands Java's BER and legacy RC2/3DES SafeContents,
+    # and preserves all key bags for a lossless re-export.  Fall back to the
+    # high-level cryptography parser for layouts it does not understand.
+    raw = _load_pkcs12_raw(data, password, path)
+    if raw is not None:
+        return raw
     try:
         key, certificate, extras = pkcs12.load_key_and_certificates(
             data, password.encode("utf-8") if password else None
@@ -168,6 +199,7 @@ def _load_pkcs12(data: bytes, password: str, path: str) -> CertificateBundle:
         has_private_key=key is not None,
         key_description=certs.key_description(key.public_key()) if key is not None else "",
         warnings=warnings,
+        private_key=key,
     )
 
 
@@ -230,6 +262,296 @@ def _load_jks(data: bytes, password: str, path: str, magic: int) -> CertificateB
         warnings=warnings,
         integrity_checked=integrity_checked,
     )
+
+
+def _load_pkcs12_raw(data: bytes, password: str, path: str) -> "CertificateBundle | None":
+    try:
+        pfx = ber.parse(data)
+        if pfx.tag != 0x10 or len(pfx.children) < 2:  # pragma: no cover - not a PKCS#12 PFX
+            return None
+        auth_info = pfx.children[1]
+        if auth_info.tag != 0x10 or len(auth_info.children) < 2:
+            return None
+        authenticated_bytes = ber.octets(auth_info.children[1])
+        if password:
+            _verify_pfx_mac(pfx, authenticated_bytes, password)
+        authenticated = ber.parse(authenticated_bytes)
+        entries: "list[BundleCertificate]" = []
+        seen: "set[str]" = set()
+        raw_cert_bags: "list[bytes]" = []
+        raw_key_bags: "list[bytes]" = []
+        key_aliases: "list[str]" = []
+        encrypted_certificates = False
+        for content_info in authenticated.children:
+            oid = ber.decode_oid(content_info.children[0].content)
+            content = content_info.children[1]
+            if oid == "1.2.840.113549.1.7.1":  # data
+                safe = ber.parse(ber.octets(content))
+                _collect_safe(safe, entries, seen, raw_cert_bags, raw_key_bags, key_aliases)
+            elif oid == "1.2.840.113549.1.7.6":  # encryptedData
+                if not password:
+                    encrypted_certificates = True
+                    continue
+                plaintext = _decrypt_encrypted_data(content, password)
+                safe = ber.parse(plaintext)
+                _collect_safe(safe, entries, seen, raw_cert_bags, raw_key_bags, key_aliases)
+    except _UnsupportedPBE:
+        return None
+    except (ber.BERError, IndexError, ValueError) as exc:
+        if password:
+            raise CryptoError("could not decode PKCS#12 bundle: %s" % exc) from exc  # pragma: no cover - malformed PFX
+        return None
+
+    if not entries:
+        if encrypted_certificates:
+            raise CryptoError("the PKCS#12 certificates are encrypted; a passphrase is required")
+        return None  # pragma: no cover - empty PFX
+    role = "leaf" if len(raw_key_bags) == 1 else "certificate"
+    if not raw_key_bags:
+        role = "trusted"
+    for index, entry in enumerate(entries):
+        if index == 0:
+            entry.role = role
+        elif role == "leaf":
+            entry.role = "chain"
+    warnings = []
+    if not password and raw_key_bags:  # pragma: no cover - raw keys plus visible certs
+        warnings.append("key bags are present but encrypted; passphrase not supplied")
+    if len(raw_key_bags) > 1:
+        warnings.append("%d key entries are preserved in the re-export" % len(raw_key_bags))
+    return CertificateBundle(
+        path=path,
+        format="pkcs12",
+        certificates=entries,
+        has_private_key=bool(raw_key_bags),
+        key_description=(
+            "%d Java key entries (preserved)" % len(raw_key_bags)
+            if len(raw_key_bags) > 1
+            else ("Java key entry (preserved)" if raw_key_bags else "")
+        ),
+        warnings=warnings,
+        key_count=len(raw_key_bags),
+        key_aliases=key_aliases,
+        raw_key_bags=raw_key_bags,
+        raw_cert_bags=raw_cert_bags,
+    )
+
+
+def _verify_pfx_mac(pfx, authenticated_bytes: bytes, password: str) -> None:
+    if len(pfx.children) < 3:  # pragma: no cover - MAC is optional
+        return
+    mac_data = pfx.children[2]
+    if mac_data.tag != 0x10 or len(mac_data.children) < 2:  # pragma: no cover - malformed MAC
+        return
+    digest_info = mac_data.children[0]
+    if digest_info.tag != 0x10 or len(digest_info.children) < 2:  # pragma: no cover - malformed MAC
+        return
+    algorithm = digest_info.children[0]
+    digest = digest_info.children[1].content
+    oid = ber.decode_oid(algorithm.children[0].content)
+    hash_name = {
+        "1.3.14.3.2.26": "sha1",
+        "2.16.840.1.101.3.4.2.1": "sha256",
+        "2.16.840.1.101.3.4.2.2": "sha384",
+        "2.16.840.1.101.3.4.2.3": "sha512",
+    }.get(oid)
+    if hash_name is None:  # pragma: no cover - exotic MAC algorithm
+        raise _UnsupportedPBE("unsupported PKCS#12 MAC algorithm %s" % oid)
+    salt = mac_data.children[1].content
+    iterations = (
+        int.from_bytes(mac_data.children[2].content, "big")
+        if len(mac_data.children) > 2
+        else 1
+    )
+    hash_function = getattr(hashlib, hash_name)
+    mac_key = pkcs12_kdf(
+        _bmp_password(password), salt, 3, iterations, hash_function().digest_size, hash_name
+    )
+    expected = hmac.new(mac_key, authenticated_bytes, hash_function).digest()
+    if not hmac.compare_digest(expected, digest):
+        raise CryptoError("PKCS#12 integrity check failed (wrong passphrase or corrupt file)")
+
+
+def _collect_safe(
+    safe,
+    entries: "list[BundleCertificate]",
+    seen: "set[str]",
+    raw_cert_bags: "list[bytes]",
+    raw_key_bags: "list[bytes]",
+    key_aliases: "list[str]",
+) -> None:
+    for bag in safe.children:
+        if bag.tag != 0x10 or len(bag.children) < 2:  # pragma: no cover - malformed bag
+            continue
+        bag_oid = ber.decode_oid(bag.children[0].content)
+        alias = _bag_alias(bag)
+        if bag_oid == "1.2.840.113549.1.12.10.1.3":  # certBag
+            value = bag.children[1]
+            cert_bag = value.children[0] if value.children else value
+            if len(cert_bag.children) < 2:  # pragma: no cover - malformed CertBag
+                continue
+            cert_type = ber.decode_oid(cert_bag.children[0].content)
+            if cert_type != "1.2.840.113549.1.9.22.1":  # pragma: no cover - non-X.509 CertBag
+                continue
+            der = ber.octets(cert_bag.children[1])
+            certificate = _load_der(der)
+            _add(entries, seen, "certificate", certificate, alias)
+            raw_cert_bags.append(bag.encoded)
+        elif bag_oid == "1.2.840.113549.1.12.10.1.2":  # pkcs8ShroudedKeyBag
+            raw_key_bags.append(bag.encoded)
+            key_aliases.append(alias)
+
+
+def _bag_alias(bag) -> str:
+    for child in bag.children[2:]:
+        if child.tag != 0x11:  # SET OF Attribute
+            continue  # pragma: no cover - malformed attributes
+        for attr in child.children:
+            if attr.tag != 0x10 or len(attr.children) < 2:  # pragma: no cover - malformed attribute
+                continue
+            oid = ber.decode_oid(attr.children[0].content)
+            if oid != "1.2.840.113549.1.9.20":
+                continue
+            values = attr.children[1]
+            if values.children and values.children[0].tag == 0x1E:
+                return values.children[0].content.decode("utf-16-be", "replace")
+    return ""
+
+
+def _decrypt_encrypted_data(content, password: str) -> bytes:
+    encrypted_data = content.children[0] if content.children else content
+    sequence = encrypted_data if encrypted_data.tag == 0x10 else encrypted_data.children[0]
+    encrypted_content_info = sequence.children[1]
+    algorithm = encrypted_content_info.children[1]
+    encrypted = encrypted_content_info.children[2]
+    oid = ber.decode_oid(algorithm.children[0].content)
+    params = algorithm.children[1]
+    salt = params.children[0].content
+    iterations = int.from_bytes(params.children[1].content, "big")
+    key_length = {
+        "1.2.840.113549.1.12.1.3": 24,
+        "1.2.840.113549.1.12.1.4": 16,
+        "1.2.840.113549.1.12.1.5": 16,
+        "1.2.840.113549.1.12.1.6": 5,
+    }.get(oid)
+    if key_length is None:
+        raise _UnsupportedPBE("unsupported PKCS#12 encryption algorithm %s" % oid)
+    password_bytes = _bmp_password(password)
+    key = pkcs12_kdf(password_bytes, salt, 1, iterations, key_length, "sha1")
+    iv = pkcs12_kdf(password_bytes, salt, 2, iterations, 8, "sha1")
+    ciphertext = ber.octets(encrypted)
+    if key_length == 24:
+        decryptor = Cipher(TripleDES(key), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+    elif key_length == 16:  # pragma: no cover - RC2-128 legacy variant
+        if RC2 is None:
+            raise _UnsupportedPBE("this cryptography build has no RC2 support")
+        decryptor = Cipher(RC2(key), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+    else:
+        # cryptography's RC2 wrapper only accepts 128-bit keys.  Legacy Java
+        # keystores use the 40-bit PKCS#12 profile, which OpenSSL still
+        # implements when its legacy provider is loaded.
+        padded = _openssl_rc2_40_decrypt(ciphertext, key, iv)
+    unpadder = padding.PKCS7(64).unpadder()
+    return unpadder.update(padded) + unpadder.finalize()
+
+
+def _openssl_rc2_40_decrypt(ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
+    base = [
+        "openssl",
+        "enc",
+        "-d",
+        "-rc2-40-cbc",
+        "-nopad",
+        "-K",
+        key.hex(),
+        "-iv",
+        iv.hex(),
+    ]
+    attempts = [
+        base + ["-provider", "legacy", "-provider", "default"],
+        base,
+    ]
+    errors = []
+    for command in attempts:
+        try:
+            result = subprocess.run(  # noqa: UP022 - capture_output is 3.7+
+                command,
+                input=ciphertext,
+                stdout=subprocess.PIPE,  # noqa: UP022 - capture_output is 3.7+
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - no openssl
+            errors.append(str(exc))
+            continue
+        if result.returncode == 0:
+            return result.stdout
+        errors.append(result.stderr.decode("utf-8", "replace").strip())  # pragma: no cover - unsupported openssl
+    raise CryptoError(
+        "could not decrypt legacy RC2 PKCS#12 data; install an OpenSSL with "
+        "legacy RC2 support: %s" % (errors[-1] if errors else "unknown error")
+    )
+
+
+def write_java_bundle(
+    path: "str | Path",
+    bundle: CertificateBundle,
+    password: str,
+    *,
+    legacy: bool = True,
+) -> str:
+    """Write every certificate (and a matching key, if present) as PKCS#12.
+
+    ``legacy=True`` uses PBE-SHA1-3DES + SHA-1 so the result can be read by the
+    old Java CertWizard/keytool.  A bundle without a usable private key is
+    written as a certificate-only PKCS#12, which is suitable for a truststore.
+    """
+    if not password:
+        raise CryptoError("a password is required to write a Java bundle")
+    certificates = [entry.certificate for entry in bundle.certificates]
+    if not certificates:
+        raise CryptoError("the bundle contains no certificates")
+    if bundle.raw_key_bags or bundle.raw_cert_bags:
+        p12.write_raw_pkcs12(
+            Path(path),
+            key_bags=bundle.raw_key_bags,
+            cert_bags=bundle.raw_cert_bags,
+            password=password,
+        )
+        return str(path)
+    if bundle.has_private_key and bundle.private_key is None:
+        raise CryptoError(
+            "the bundle contains a private key that pyCert cannot decode; "
+            "use Save all PEM or let the Java tool convert it"
+        )
+    leaf = next((entry for entry in bundle.certificates if entry.role == "leaf"), None)
+    key = bundle.private_key
+    if key is not None and leaf is not None and certs.certificate_matches_key(leaf.certificate, key):
+        chain = [
+            entry.certificate
+            for entry in bundle.certificates
+            if certs.fingerprint(entry.certificate) != certs.fingerprint(leaf.certificate)
+        ]
+        p12.write_pkcs12(
+            Path(path),
+            key=key,
+            certificate=leaf.certificate,
+            chain=chain,
+            password=password,
+            friendly_name=certs.common_name(leaf.certificate.subject),
+            legacy=legacy,
+            preserve_chain=True,
+        )
+    else:
+        p12.write_certificate_bundle(
+            Path(path),
+            certificates=certificates,
+            password=password,
+            legacy=legacy,
+        )
+    return str(path)
 
 
 def _bundle_from_certificates(

@@ -30,7 +30,13 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 from . import certs
 from .compat import dataclass
 from .errors import CryptoError, PyCertError
-from .pkcs12_writer import DEFAULT_ITERATIONS, DEFAULT_MAC_ITERATIONS, encode_pkcs12
+from .pkcs12_writer import (
+    DEFAULT_ITERATIONS,
+    DEFAULT_MAC_ITERATIONS,
+    encode_certificate_bundle,
+    encode_pkcs12,
+    encode_raw_pkcs12,
+)
 from .util import SECRET_FILE_MODE, atomic_write, ensure_dir
 
 MAX_P12_BYTES = 16 * 1024 * 1024
@@ -62,8 +68,14 @@ def write_pkcs12(
     verify: bool = True,
     iterations: int = DEFAULT_ITERATIONS,
     mac_iterations: int = DEFAULT_MAC_ITERATIONS,
+    legacy: bool = False,
+    preserve_chain: bool = False,
 ) -> Path:
-    """Write an encrypted PKCS#12 bundle and (by default) read it back."""
+    """Write an encrypted PKCS#12 bundle and (by default) read it back.
+
+    ``preserve_chain`` keeps unrelated certificates from a legacy bundle
+    instead of reducing the chain to the path from leaf to root.
+    """
     if not password:
         raise PyCertError("refusing to write a PKCS#12 file without a password")
     if not certs.certificate_matches_key(certificate, key):
@@ -72,7 +84,7 @@ def write_pkcs12(
         )
     if chain and len(chain) > MAX_CHAIN_CERTIFICATES:
         raise PyCertError("refusing to embed more than %d chain certificates" % MAX_CHAIN_CERTIFICATES)
-    chain = _ordered_chain(certificate, chain or [])
+    chain = list(chain or []) if preserve_chain else _ordered_chain(certificate, chain or [])
     name = (friendly_name or certs.common_name(certificate.subject))[:64]
     try:
         blob = encode_pkcs12(
@@ -84,6 +96,7 @@ def write_pkcs12(
             iterations=iterations,
             mac_iterations=mac_iterations,
             mac_hash="sha256",
+            legacy=legacy,
         )
         if verify:
             try:
@@ -100,6 +113,7 @@ def write_pkcs12(
                     iterations=iterations,
                     mac_iterations=mac_iterations,
                     mac_hash="sha1",
+                    legacy=legacy,
                 )
                 bundle = read_pkcs12_bytes(blob, password)
             if certs.fingerprint(bundle.cert) != certs.fingerprint(certificate):
@@ -110,6 +124,76 @@ def write_pkcs12(
                 raise CryptoError("PKCS#12 verification failed after writing: private key mismatch")
     except (ValueError, TypeError) as exc:
         raise CryptoError(f"could not create PKCS#12 bundle: {exc}") from exc
+    path = Path(path)
+    ensure_dir(path.parent)
+    atomic_write(path, blob, mode=SECRET_FILE_MODE)
+    return path
+
+
+def write_certificate_bundle(
+    path: Path,
+    *,
+    certificates: "list[x509.Certificate]",
+    password: str,
+    friendly_name: str = "",
+    verify: bool = True,
+    iterations: int = DEFAULT_ITERATIONS,
+    mac_iterations: int = DEFAULT_MAC_ITERATIONS,
+    legacy: bool = False,
+) -> Path:
+    """Write a certificate-only PKCS#12 bundle (all certificates, no key)."""
+    if not password:
+        raise PyCertError("refusing to write a PKCS#12 file without a password")
+    if not certificates:
+        raise PyCertError("refusing to write an empty certificate bundle")
+    if len(certificates) > MAX_CHAIN_CERTIFICATES:
+        raise PyCertError("refusing to embed more than %d certificates" % MAX_CHAIN_CERTIFICATES)
+    try:
+        blob = encode_certificate_bundle(
+            certificates,
+            password,
+            friendly_name=friendly_name,
+            iterations=iterations,
+            mac_iterations=mac_iterations,
+            mac_hash="sha1" if legacy else "sha256",
+            legacy=legacy,
+        )
+        if verify:
+            key, first, extras = pkcs12.load_key_and_certificates(blob, password.encode("utf-8"))
+            if key is not None:
+                raise CryptoError("PKCS#12 verification failed: unexpected private key")
+            found = ([first] if first is not None else []) + list(extras or [])
+            expected = {certs.fingerprint(c) for c in certificates}
+            actual = {certs.fingerprint(c) for c in found}
+            if expected != actual:
+                raise CryptoError("PKCS#12 verification failed after writing: certificate mismatch")
+    except (ValueError, TypeError) as exc:
+        raise CryptoError(f"could not create PKCS#12 certificate bundle: {exc}") from exc
+    path = Path(path)
+    ensure_dir(path.parent)
+    atomic_write(path, blob, mode=SECRET_FILE_MODE)
+    return path
+
+
+def write_raw_pkcs12(
+    path: Path,
+    *,
+    key_bags: "list[bytes]",
+    cert_bags: "list[bytes]",
+    password: str,
+    mac_iterations: int = DEFAULT_MAC_ITERATIONS,
+) -> Path:
+    """Write raw Java PKCS#12 bags while retaining every key entry."""
+    if not password:
+        raise PyCertError("refusing to write a PKCS#12 file without a password")
+    if not cert_bags:
+        raise PyCertError("refusing to write an empty certificate bundle")
+    blob = encode_raw_pkcs12(
+        key_bags,
+        cert_bags,
+        password,
+        mac_iterations=mac_iterations,
+    )
     path = Path(path)
     ensure_dir(path.parent)
     atomic_write(path, blob, mode=SECRET_FILE_MODE)

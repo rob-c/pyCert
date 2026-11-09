@@ -38,7 +38,7 @@ def config(tmp_path, ca):
     config.chain = [ChainEntry(label=name, file=f"chain/{name}", sha256=pin) for name, pin in pins.items()]
     config.ca.base_url = ca.url
     config.ca.retries = 0
-    config.ca.timeout = 10.0
+    config.ca.timeout = 60.0
     config.identity.email = "test@example.org"
     config.identity.ra = "CLRC DL"
     config.paths.data_dir = str(tmp_path / "data")

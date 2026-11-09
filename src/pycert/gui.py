@@ -21,6 +21,7 @@ Security notes:
 import os
 import queue
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -28,7 +29,7 @@ import tkinter as tk
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable
 
 from . import __version__, bundles, certs
@@ -1184,6 +1185,7 @@ class BundleDialog(tk.Toplevel):
         self.configure(background=_colors()["bg"])
         self.parent = parent
         self.bundle: "bundles.CertificateBundle | None" = None
+        self._loaded_password = ""
         self._path = path
         self.title("Inspect certificate bundle")
         self.transient(parent)
@@ -1271,6 +1273,12 @@ class BundleDialog(tk.Toplevel):
         self.copy_all_button.pack(side="left", padx=(8, 0))
         self.save_button = ttk.Button(buttons, text="Save all PEM...", command=self._save_all)
         self.save_button.pack(side="left", padx=(8, 0))
+        self.save_java_button = ttk.Button(
+            buttons, text="Save Java PKCS#12...", command=self._save_java
+        )
+        self.save_java_button.pack(side="left", padx=(8, 0))
+        self.update_button = ttk.Button(buttons, text="Update bundle...", command=self._update_bundle)
+        self.update_button.pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
         self._set_bundle_buttons(False)
 
@@ -1307,6 +1315,7 @@ class BundleDialog(tk.Toplevel):
                 messagebox.showerror("Could not decode bundle", str(exc), parent=self)
             return
         self.bundle = bundle
+        self._loaded_password = self.password_var.get()
         self._populate()
         self._status(self._summary(bundle))
 
@@ -1355,8 +1364,17 @@ class BundleDialog(tk.Toplevel):
 
     def _set_bundle_buttons(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for button in (self.copy_button, self.copy_all_button, self.save_button):
+        for button in (
+            self.copy_button,
+            self.copy_all_button,
+            self.save_button,
+            self.save_java_button,
+        ):
             button.configure(state=state)
+        if enabled and self.bundle is not None and self.bundle.format == "pkcs12":
+            self.update_button.configure(state="normal")
+        else:
+            self.update_button.configure(state="disabled")
 
     def _selected_entry(self) -> "bundles.BundleCertificate | None":
         selection = self.tree.selection()
@@ -1405,6 +1423,76 @@ class BundleDialog(tk.Toplevel):
         lines.append("AKI          %s" % description.authority_key_id)
         lines.extend(["", "Certificate PEM:", "", certs.cert_pem(entry.certificate)])
         _set_text(self.details, "\n".join(lines))
+
+    def _ask_bundle_password(self) -> "str | None":
+        if self.bundle is not None and self.bundle.raw_key_bags:
+            # Raw key bags stay encrypted with the passphrase used to open the
+            # source bundle.  Changing it would make the Java keys unreadable.
+            return self._loaded_password
+        return simpledialog.askstring(
+            "Java bundle password",
+            "Passphrase for the new PKCS#12 bundle:",
+            show="*",
+            parent=self,
+        )
+
+    def _save_java(self) -> None:
+        if self.bundle is None:
+            return
+        default = Path(self.bundle.path).with_suffix(".p12").name if self.bundle.path else "certificates.p12"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save Java-compatible PKCS#12",
+            defaultextension=".p12",
+            initialfile=default,
+            filetypes=[("PKCS#12", "*.p12 *.pfx"), ("All files", "*")],
+        )
+        if not path:
+            return
+        if Path(path) == Path(self.bundle.path):
+            messagebox.showinfo(
+                "Use Update bundle",
+                "That is the open bundle. Use 'Update bundle...' to write it in place.",
+                parent=self,
+            )
+            return
+        password = self._ask_bundle_password()
+        if not password:
+            return
+        try:
+            bundles.write_java_bundle(path, self.bundle, password)
+        except (OSError, PyCertError) as exc:
+            messagebox.showerror("Could not save bundle", str(exc), parent=self)
+            return
+        self._status("Java-compatible PKCS#12 written to %s." % path)
+
+    def _update_bundle(self) -> None:
+        if self.bundle is None or self.bundle.format != "pkcs12":
+            messagebox.showinfo(
+                "Update bundle",
+                "In-place update is available for PKCS#12 bundles. Use 'Save Java PKCS#12...' for JKS/JCEKS.",
+                parent=self,
+            )
+            return
+        path = Path(self.bundle.path)
+        if not messagebox.askyesno(
+            "Update Java bundle",
+            "Rewrite %s with its decoded certificates and private key?\n\n"
+            "A backup named %s.bak will be kept." % (path, path.name),
+            parent=self,
+        ):
+            return
+        password = self._ask_bundle_password()
+        if not password:
+            return
+        backup = path.with_name(path.name + ".bak")
+        try:
+            shutil.copy2(str(path), str(backup))
+            bundles.write_java_bundle(path, self.bundle, password)
+        except (OSError, PyCertError) as exc:
+            messagebox.showerror("Could not update bundle", str(exc), parent=self)
+            return
+        self._status("Bundle updated in place; backup: %s" % backup)
 
     def _all_pem(self) -> str:
         if self.bundle is None:
@@ -1707,7 +1795,7 @@ class PyCertApp(tk.Tk):
             command=self.new_request,
         )
         file_menu.add_command(label="Import PKCS#12...", command=self.import_p12_dialog)
-        file_menu.add_command(label="Inspect Java bundle...", command=self.inspect_bundle_dialog)
+        file_menu.add_command(label="Open old Java bundle...", command=self.inspect_bundle_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Open configuration", command=lambda: _open_text_file(self.cfg.path))
         file_menu.add_command(label="Open data folder", command=lambda: _open_path(self.cfg.data_dir))
@@ -1824,6 +1912,9 @@ class PyCertApp(tk.Tk):
             button.pack(side="left", padx=(0, 6))
             Tooltip(button, tip)
             self.buttons[name] = button
+        ttk.Button(bar, text="Open bundle", command=self.inspect_bundle_dialog).pack(
+            side="right", padx=(0, 8)
+        )
         ttk.Button(bar, text="Settings", command=lambda: SettingsDialog(self)).pack(side="right")
         self._update_buttons()
 

@@ -38,11 +38,17 @@ $ pycert import ~/.ca/cakeystore.pkcs12 --alias "old cert"
   not in your configured chain and you have checked it manually.
 
 Before importing, you can inspect the whole file without changing anything:
-start `pycert gui`, choose **File → Inspect Java bundle...**, select
+start `pycert gui`, choose **File → Open old Java bundle...**, select
 `cakeystore.pkcs12` and enter its passphrase. The viewer lists every certificate
 with its Java alias, role, subject, issuer and fingerprint, and can save all
 public certificates as PEM. It also understands `.jks`/`.jceks` trust stores
 and PEM/DER bundles. Java is not required for this inspection.
+
+**Save Java PKCS#12...** writes a new Java-compatible bundle (legacy
+PBE-SHA1-3DES/SHA-1) containing all decoded certificates and the original key
+when one is available. **Update bundle...** rewrites an existing `.p12` in place
+with a backup. Use the latter when you want to move an old CertWizard keystore
+to a new host or refresh its certificate contents without Java.
 
 If your Java keystore contains several entries, import them one at a time with
 distinct `--alias` values. `keytool -list -keystore ~/.ca/cakeystore.pkcs12

@@ -122,6 +122,9 @@ CA and does not bypass UK-CA policy.
   SAN/contact changes during renewal, revocation, import of old Java PKCS#12
   files, installation, scheduled renewal/watch, diagnostics and RFC 3820 proxy
   bundles.
+- Includes a GUI bundle inspector/editor for old Java PKCS#12/JKS/JCEKS files:
+  show every certificate, save all certs, write Java-compatible PKCS#12, and
+  update a PKCS#12 with a backup.
 - Has no mandatory runtime dependencies other than
   [`cryptography`](https://cryptography.io/) and supports Python 3.6+.
 
@@ -191,23 +194,46 @@ The GUI can open a legacy CertWizard PKCS#12 file, a Java JKS/JCEKS trust
 store, or a PEM/DER certificate bundle without importing it first:
 
 1. Start `pycert gui`.
-2. Choose **File → Inspect Java bundle...**.
+2. Choose **File → Open old Java bundle...**, or click **Open bundle** on the
+   main toolbar.
 3. Select the file and enter its passphrase if required.
 4. Every certificate is listed with its role (`leaf`, `chain`, `trusted` or
    `certificate`), subject, issuer, expiry, key, SHA-256 fingerprint and alias.
    Selecting a row shows the decoded fields and the certificate PEM.
 
-The viewer is read-only: it never displays or exports private keys. **Copy
-selected PEM**, **Copy all PEM** and **Save all PEM...** are available when you
-need the public certificates. PKCS#12 files keep their private key on disk and
-are not modified; use `pycert import` when you want to add a key and certificate
-to pyCert's own request store.
+The viewer never displays private keys. Available actions:
 
-Java PKCS#12 files with legacy PBE-SHA1-3DES or RC2 encryption are decoded via
+- **Copy selected PEM** and **Copy all PEM**;
+- **Save all PEM...** for every public certificate in the bundle;
+- **Save Java PKCS#12...** to write a new bundle containing every certificate
+  and, when available, the original private key;
+- **Update bundle...** to rewrite an existing PKCS#12 in place. A
+  `<name>.pkcs12.bak` backup is created first.
+
+Java-compatible output uses the legacy PBE-SHA1-3DES + SHA-1 PKCS#12 profile
+that old CertWizard/keytool releases understand. Bundles with no usable private
+key are written as certificate-only PKCS#12 trust stores. JKS/JCEKS files can
+be read and saved as Java-compatible PKCS#12; in-place update is only offered
+for PKCS#12 because Java's JKS private-key protection is not re-created by
+pyCert.
+
+CertWizard's real `cakeystore.pkcs12` can contain many independent key entries:
+the current files use RC2-40 for the certificate SafeContents and 3DES for each
+key bag. pyCert's raw keystore path decodes the BER/indefinite-length container,
+lists every certificate, and preserves all key bags, aliases and localKeyIDs
+when saving or updating. Saving or updating such a bundle uses the passphrase
+you entered to open it, because the original key bags remain individually
+encrypted; changing the passphrase would require re-encrypting every private
+key and is not offered in the GUI yet. On systems where the linked OpenSSL omits
+legacy RC2, pyCert uses the local `openssl enc` legacy fallback and reports a
+clear error if that is unavailable.
+
+PKCS#12 files with legacy PBE-SHA1-3DES or RC2 encryption are decoded via
 `cryptography`/OpenSSL where the installed library supports them. JKS/JCEKS
 certificate entries are parsed natively; a supplied JKS password verifies the
 integrity digest, while leaving it blank still lists the certificates with a
-warning that the digest was not checked.
+warning that the digest was not checked. Use `pycert import` when you want to
+add a key and certificate to pyCert's own request store.
 
 ---
 
@@ -614,7 +640,7 @@ use Python 3.9+ for new deployments.
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # full test suite (7,372 tests)
+$ make test           # full test suite (7,396 tests)
 $ make coverage       # full suite + 100% non-GUI line coverage gate
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6
@@ -652,6 +678,7 @@ src/pycert/
 ├── csr.py             PKCS#10 construction
 ├── p12.py             PKCS#12 read/write
 ├── bundles.py         legacy Java/PEM certificate bundle decoder
+├── ber.py             strict BER/DER reader for Java PKCS#12
 ├── pkcs12_writer.py   modern PKCS#12 container
 ├── store.py           on-disk state, permissions and locking
 ├── secrets_store.py   keychain/secret-service/file/command backends
