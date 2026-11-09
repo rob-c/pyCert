@@ -1,71 +1,135 @@
 # pyCert
 
-**A Python 3 replacement for the Java CertWizard client for the UK e-Science CA.**
+**A Python 3 client, test CA and ACME v2 front-end for the UK e-Science certificate service.**
 
-One command requests a certificate, waits for the RA to approve and the CA operator
-to sign it, downloads the issued certificate with its *full chain*, verifies that
-chain, and writes an encrypted PKCS#12 bundle whose passphrase is kept in the OS
-secret store:
+pyCert is a replacement for the Java **CertWizard** client. It requests user and
+host certificates, waits for RA approval and CA signing, downloads and verifies
+the full chain, and writes an encrypted PKCS#12 bundle whose passphrase is kept
+in the operating-system secret store.
+
+The repository also contains a complete **local CA sandbox** that speaks the
+legacy CertWizard/OpenCA protocol, and a reference **ACME v2 wrapper** that lets
+standard clients such as `certbot` obtain certificates from the same CA state.
+The sandbox is for development, interoperability testing and migration planning;
+it is **not** a production CA.
 
 ```console
 $ pycert request "Jane Doe" --wait
   Preparing request...
-  Generating a 3072-bit RSA key (this can take a few seconds)...
-  Building the PKCS#10 request for 'C=UK,O=eScience,OU=CLRC,L=DL,CN=jane doe'...
+  Generating a 3072-bit RSA key...
   Submitting to the CA...
-  CSR submitted; awaiting RA approval and CA signing. ...
-  submitted, awaiting RA approval — next check in 60s (attempt 1, 0s elapsed)
+  CSR submitted; awaiting RA approval and CA signing.
   Certificate issued (server status VALID)
   Verifying the certificate chain...
-  Certificate stored: ~/.local/share/pycert/requests/jane-doe/cert.pem (valid until 2027-11-06)
-  Writing PKCS#12 bundle ~/.local/share/pycert/requests/jane-doe/jane_doe.p12 ...
+  Writing PKCS#12 bundle .../jane_doe.p12
   PIN for the RA: K7QF-2M9X-P4RT
 
 Request 'jane doe' is DOWNLOADED.
-  PKCS#12: ~/.local/share/pycert/requests/jane-doe/jane_doe.p12
 ```
 
-It also has a lightweight Tkinter GUI (`pycert gui`) that does the same thing and
-adds a certificate list, expiry warnings, chain inspection and one-click verification.
+A Tkinter GUI provides the same workflow, a certificate list, expiry warnings,
+chain inspection and one-click verification:
+
+```console
+$ pycert gui
+```
 
 ---
 
-## Why this exists
+## What this repository contains
 
-The Java client works, but it is hard to audit, hard to automate, and carries a
-lot of legacy: a bundled JRE, Restlet, BouncyCastle, Log4j and a trust store
-whose password is the literal string `passwd`. pyCert is about 10,700 lines of
-Python - including a 2,000-line Tkinter GUI - plus 7,800 lines of tests, and
-depends only on [`cryptography`](https://cryptography.io/). The modules that
-talk to the CA (transport, client, chain, certificates, CSR, PKCS#12 and
-workflow) are about 4,000 lines and can be reviewed end to end in an afternoon.
-
-### At a glance
-
-| | CertWizard (Java) | pyCert |
+| Component | Location | Purpose |
 |---|---|---|
-| Runtime | JDK 25+ (current `develop`), bundled JRE in installers | Python 3.6+ (stdlib + `cryptography`) |
-| Startup | JVM + Swing + Restlet initialisation | ~90 ms CLI, ~440 ms to a painted GUI window (measured) |
-| Build | Maven, NetBeans for the GUI forms | `pip install .` |
-| TLS trust | JKS trust store, password `passwd` in the config | PEM chain in the config, pinned by SHA-256; optional leaf pin |
-| CSR signature | `MD5WithRSA` in the shipped template | SHA-256 minimum; MD5/SHA-1 refused |
-| Private key | PKCS#12 client keystore, password passed via a Java system property | PKCS#8 encrypted per request, mode 0600 |
-| PKCS#12 export | manual, per certificate, password typed into a dialog | automatic after signing; passphrase in keychain/secret service, mode 0600 |
-| Chain | downloaded certificate only; chain building was a TODO | full chain built and **cryptographically verified** before export |
-| Waiting for signing | user clicks refresh repeatedly | `--wait` / `pycert wait`, exponential jitter, cancellable, exit code 3 on timeout |
-| PIN | SHA-1 hash, entered in a Swing dialog | SHA-1 hash (server requirement), generated once and shown in a modal/GUI |
-| Automation | GUI only | CLI + `--json` + exit codes + cron/launchd examples |
-| Tests | a couple of XML parser tests | 7,360 tests (100% non-GUI line coverage), including a mock CA listener, every CLI action end-to-end, fault injection, fuzzing and concurrency suites |
-| Documentation | `readme.txt` | README, configuration reference, protocol notes, CA-listener and proxy contracts, Java sandbox, security model, migration guide |
+| **pyCert client** | `src/pycert/` | CLI and GUI for the legacy UK-CA/CertWizard protocol: request, wait, download, verify, export, renew, revoke, import, install, watch and proxy delegation. |
+| **Legacy CA sandbox** | `sandbox_ca/mock_ca.py`, `sandbox_ca/server.py` | A real-TLS test CA implementing the old CertWizard listener contract, with persistent requests/certificates, RA approval, signing and fault injection. |
+| **ACME v2 wrapper** | `sandbox_ca/acme.py` | An RFC 8555 front-end over the sandbox CA state, for certbot, nginx and other ACME clients. |
+| **Java compatibility kit** | `sandbox_ca/java_kit.py` | Patches a built CertWizard JAR so its pinned CA certificates and URLs point at the sandbox. |
 
-Everything above is verifiable from the sources: the Java template default is in
-`src/main/resources/template.configure.properties`, the trust store password in
-`SysProperty.setupTrustStore()`, the “chain building” TODO in
-`readme.txt` and `ClientKeyStoreCaServiceWrapper`.
+The production UK e-Science CA is an external service. pyCert does not replace
+it; it implements the client side of its legacy contract. `docs/CA_LISTENER.md`
+documents that contract, and `sandbox_ca/` provides a runnable implementation
+for testing.
+
+### Architecture
+
+```text
+                         LEGACY PATH
+  CertWizard (Java) ─┐
+  pyCert CLI/GUI ────┼── HTTPS + XML + PPPK ──▶ Legacy CA listener
+                     │                         /CSR, /CSRs, /CA, /pingservice,
+                     │                         /resources/..., /certificate/<id>,
+                     │                         /revoke
+                     │                              │
+                     │                              ▼
+                     │                         RA approval → CA signing
+                     │                         → certificate store
+                     │
+                         ACME PATH
+  certbot / nginx ─────── HTTPS + JWS ───────▶ ACME v2 wrapper
+  ACME clients            (RFC 8555)           /acme/directory, new-order,
+                                               authz, challenge, finalize,
+                                               certificate, revoke-cert
+                                                    │
+                                                    ▼
+                                         same in-process CA state:
+                                         CSR record → approve/sign
+                                         → certificate id → download/revoke
+```
+
+The two front-ends share the sandbox CA records, signing function and
+certificate store. The ACME wrapper is a façade: it does not implement a second
+CA and does not bypass UK-CA policy.
+
+## Contents
+
+- [What this repository contains](#what-this-repository-contains)
+- [What pyCert does](#what-pycert-does)
+- [Install and quick start](#install-and-quick-start)
+- [The legacy CA listener](#the-legacy-ca-listener)
+- [The ACME v2 wrapper](#the-acme-v2-wrapper)
+- [CLI reference](#cli-reference)
+- [What pyCert writes](#what-pycert-writes)
+- [Security](#security)
+- [Compatibility notes](#compatibility-notes)
+- [Development and tests](#development-and-tests)
+- [Limitations and non-goals](#limitations-and-non-goals)
 
 ---
 
-## Install
+## What pyCert does
+
+- Generates the private key and PKCS#10 CSR locally.
+- Uses the legacy CertWizard protocol over HTTPS:
+  - user requests: `POST /CSR`;
+  - host requests: `POST /CSRs` with PPPK authentication;
+  - renewals: `POST /CSR` with PPPK (the current Java behaviour; `/CSRs` remains
+    a legacy alias);
+  - status lookup by public-key SPKI, certificate download by id, revocation.
+- Polls until the RA approves and the CA signs, with bounded backoff,
+  cancellation and a clear timeout exit code.
+- Builds and cryptographically verifies the full issuer chain before trusting
+  the issued certificate.
+- Writes a modern PKCS#12 bundle using PBES2/PBKDF2-HMAC-SHA256/AES-256-CBC,
+  with the passphrase in the macOS Keychain, Freedesktop Secret Service, an
+  external command, an environment variable, or a `0600` file.
+- Supports user certificates, host certificates, renewal with a new key,
+  SAN/contact changes during renewal, revocation, import of old Java PKCS#12
+  files, installation, scheduled renewal/watch, diagnostics and RFC 3820 proxy
+  bundles.
+- Has no mandatory runtime dependencies other than
+  [`cryptography`](https://cryptography.io/) and supports Python 3.6+.
+
+### Why not just use CertWizard?
+
+The Java client works, but it is difficult to audit and automate: it carries a
+bundled JRE, Restlet, BouncyCastle and Log4j, and its trust store password is
+literally `passwd`. pyCert keeps the protocol behaviour but replaces the
+implementation with a small Python package, explicit trust pins, verified chain
+building, modern PKCS#12, machine-readable output and a testable transport.
+
+---
+
+## Install and quick start
 
 ```console
 $ git clone https://github.com/rob-c/pyCert ~/src/pyCert
@@ -75,139 +139,312 @@ $ .venv/bin/pip install -e .
 $ .venv/bin/pycert --version
 ```
 
-The only mandatory dependency is `cryptography` (OpenSSL-backed; `>=3.0`, with
-the newest compatible release selected for your Python). The GUI uses
-`tkinter` from the standard library; on macOS with Homebrew Python install it
-with `brew install python-tk@3.15` (or the matching version).
-
-### Supported Python versions
-
-pyCert runs on **Python 3.6 and newer**.  The package deliberately avoids
-`dataclasses`, `tomllib`, `datetime.fromisoformat` and other 3.7+ APIs; the
-compatibility layer (`pycert/compat.py`, `pycert/toml.py`,
-`pycert/_dataclasses.py`) has its own tests and every package file is checked
-against the 3.6 grammar by `tools/check_py36.py`.
-
-Python 3.6 is end-of-life, and the newest `cryptography` that supports it is
-3.3.x.  pyCert works there — including the old-cryptography API fallbacks — but
-for new deployments use Python 3.9 or newer.  On 3.6 the dependency resolver
-picks cryptography 3.3.x automatically.
-
-The package is validated on Python 3.6.15 with cryptography 3.3.2 in a
-container: install, `pycert selftest`, `init`, `config check`, live `ping`/`ras`
-and `doctor`, plus a full mock-CA request → download → PKCS#12 → renew → revoke
-flow.  The 7,360 test suite itself runs on a modern Python.
-
----
-
-## Quick start
+Then create a configuration and request a certificate:
 
 ```console
 $ pycert init ~/.config/pycert --email you@example.org --ra "CLRC DL"
-Configuration written to ~/.config/pycert/pycert.toml
-Data directory:        ~/.local/share/pycert
-Saved secret backend: keychain (p12 account 'default')
-CA server:            https://cwiz-live.ca.ngs.ac.uk:443
-
 $ pycert config check
 OK: 4 CA certificates loaded, 4 trust anchors, all pins verified.
-
-$ pycert ras
-88 RAs on https://cwiz-live.ca.ngs.ac.uk:443:   # the count changes as RAs are added
-    Aberdeen DIT
-    ...
-
 $ pycert request "Jane Doe" --wait
 ```
 
-`pycert init` copies the four UK e-Science CA certificates into
-`~/.config/pycert/chain/` and records their SHA-256 fingerprints in the config.
-They are used for three things:
+`pycert init` copies the bundled UK e-Science CA certificates into the
+configuration directory and records their SHA-256 fingerprints. They are used
+as:
 
-1. as the **TLS trust anchors** for the CA server (so the host certificate is
-   verified, unlike CertWizard's hard-coded JKS),
-2. as the **trust anchors for certificate path validation**,
-3. as the **chain embedded in the exported PKCS#12**.
+1. TLS trust anchors for the CA server;
+2. trust anchors for certificate path validation;
+3. the chain embedded in the exported PKCS#12.
 
-Nothing is trusted from the network without a signature check; certificates
-fetched from `authorityInfoAccess` URLs are only accepted if the child's
+Nothing fetched from the network is trusted without a signature check.
+Certificates discovered through AIA URLs are accepted only if the child
 signature verifies with them.
 
-### Request a host certificate
-
-Host certificates must be authenticated by an existing certificate (PPPK, as in
-the Java client):
+Host certificates require an existing, currently valid RSA certificate for PPPK
+authentication:
 
 ```console
 $ pycert request host.example.ac.uk --type host --auth "jane doe" --wait
 ```
 
-### Renew and revoke
+Renew and revoke:
 
 ```console
-$ pycert renew "jane doe" --wait      # new key, PPPK-authenticated with the old one
+$ pycert renew "jane doe" --wait      # new key, authenticated with the old one
 $ pycert revoke "jane doe" --reason superseded
 ```
 
-A renewal never overwrites a working certificate until the new one has been
-issued: the new key and CSR are written as `key.next.pem` / `request.next.csr`,
-and the previous key, certificate and `.p12` are moved to `previous/<timestamp>/`
-only after the new certificate has been verified.
-
-### Inspect and verify
-
-```console
-$ pycert list
-ALIAS                        TYPE  STATUS      EXPIRES          DAYS  P12
-jane doe                     user  DOWNLOADED  2027-11-06        364  yes
-
-$ pycert verify "jane doe"
-Verifying 'jane doe'
-  [OK  ] certificate present: C=UK,O=eScience,OU=CLRC,L=DL,CN=jane doe
-  [OK  ] private key present: RSA 3072
-  [OK  ] key matches certificate: SubjectPublicKeyInfo comparison
-  [OK  ] certificate valid now: 2026-11-06 .. 2027-11-06
-  [OK  ] chain validates: 3 certificates
-  [OK  ] chain is complete: root included
-  [OK  ] PKCS#12 readable: .../jane_doe.p12
-```
-
-`pycert verify` exits 4 if anything fails, which makes it usable in monitoring.
-
-### Import an existing CertWizard PKCS#12
-
-```console
-$ pycert import ~/.ca/cakeystore.pkcs12 --alias "old cert"
-Imported 'old cert'; re-exported as ~/.local/share/pycert/requests/old-cert/old_cert.p12
-```
-
-Legacy PBE-SHA1-3DES and RC2 files produced by Java 8 are readable, so you can
-migrate a key and keep renewing it without generating a new key pair.
+A renewal does not overwrite a working certificate until the replacement has
+been issued and verified. The new files are written as `key.next.pem` and
+`request.next.csr`; the old files are archived under `previous/<timestamp>/`
+only after verification succeeds.
 
 ---
 
-## The GUI
+## The legacy CA listener
+
+### What the production listener expects
+
+The production listener is the HTTPS service used by the Java CertWizard
+client. pyCert implements the client side; `docs/CA_LISTENER.md` records the
+expected server behaviour, including the quirks that are part of the contract.
+
+At a high level:
+
+1. The client trusts a **pinned CA hierarchy**, not an arbitrary TLS certificate.
+2. It submits XML CSRs, optionally authenticated with a **PPPK** challenge.
+3. It polls the CA by public-key SPKI until the request has a certificate id.
+4. It downloads the leaf certificate by id and builds the chain from configured
+   anchors and AIA issuers.
+5. It verifies signatures and key match before storing or exporting anything.
+
+Key endpoints:
+
+| Method | Path | Authentication | Purpose |
+|---|---|---|---|
+| `GET` | `/pingservice` | none | liveness |
+| `GET` | `/CA` | none | CA certificates, RA list, policy, MOTD and client-version information |
+| `GET` | `/CA/motd/text` | none | message of the day |
+| `POST` | `/CSR` | none | new user request |
+| `POST` | `/CSR` | PPPK | renewal with `<PublicKey>` |
+| `POST` | `/CSRs` | PPPK | host request (`<Bulk><CSR>...`) or legacy renewal |
+| `POST` | `/resources/resource/publickey/pk` | none | status lookup by base64 SPKI |
+| `GET` | `/certificate/<id>` | none | download the issued leaf |
+| `POST` | `/revoke` | PPPK | revocation |
+| `GET` | `/ca/issuer.pem` | none | optional AIA issuer fetch |
+
+The Java client's PPPK flow is a two-step challenge: the listener returns
+`401` with `realm`, `nonce`, `keyid` and optionally `opaque`; the client signs
+the challenge with the RSA private exponent and retries with `PPPK` and the
+challenge headers. Renewal and host requests require RSA authentication even
+when the new key is ECDSA.
+
+Other compatibility points:
+
+- TLS server certificates must chain to the CA material pinned inside
+  `BundledCaCertificates.class`.
+- Header names are case-insensitive, but the client uses specific cases such as
+  `LocalHost`, `PPPK`, `serial`, `keyid`, `realm`, `response` and `opaque`.
+- Both `Content-Length` and chunked request bodies must be accepted.
+- The 202 rejection document contains more than one `<text>` element; the Java
+  client reads the **second** one.
+- Current Java renewals go to `/CSR`; older clients use `/CSRs`. A compatible
+  listener should support both.
+
+The full XML schemas, status model, certificate profile and error-document
+quirks are in [`docs/CA_LISTENER.md`](docs/CA_LISTENER.md).
+
+### Request lifecycle and state
+
+The legacy listener models the CA/RA workflow with a small status machine:
+
+1. A user or host CSR is accepted with `201` and enters `NEW` (`RENEW` for a
+   renewal). The request is identified by the public-key SPKI.
+2. In manual mode it stays pending until an RA/admin approves it (`APPROVED`)
+   and the CA signs it. In auto-sign mode the sandbox performs those transitions
+   after the configured number of status lookups.
+3. Once signed, the status becomes `VALID` and the record has a certificate id.
+   The client polls `/resources/resource/publickey/pk` until that id appears,
+   then downloads `/certificate/<id>`.
+4. A rejected request is `REJECTED`; a revoked certificate is `REVOKED`.
+   Unknown public keys return `404`, and a rejected CSR returns `202` with an
+   OpenCA error document.
+
+The client never treats a certificate as trusted merely because the status is
+`VALID`: it still checks the public-key match, signature chain, validity and
+name constraints locally.
+
+### The runnable sandbox
+
+`sandbox_ca` implements the listener with a throw-away CA hierarchy. It is a
+test double and must never be used as a real CA.
 
 ```console
-$ pycert gui
+$ python3 -m sandbox_ca --data-dir .sandbox-ca --port 8443
 ```
 
-- **Certificate list** with alias, type, status, expiry and days remaining;
-  status colours plus text (never colour alone).
-- **Overview** of the selected request: subject, issuer, validity, key, SHA-256,
-  SANs, chain verification result, file paths and CA state.
-- **Certificate** tab: decoded certificate details and the verified chain.
-- **History** tab: every state transition recorded by pyCert.
-- **New request** dialog: type (user/host), RA fetched from the CA, key
-  algorithm and size, extra SANs, PIN generation, “wait for signing and export”.
-- **Wait** dialog with live progress and a cancel button.
-- **Verify**, **Export**, **Renew**, **Revoke** and **Import** actions.
-- **Settings** tabs for server/TLS, identity, keys/CSR, secrets and the CA chain
-  (with pins), plus a secret-store self-test.
-- Activity log with timestamps (bounded, copyable) and clear error dialogs.
+By default it auto-approves and signs requests after one status lookup. For an
+RA-style workflow, use manual mode:
 
-The GUI never displays private keys or the PKCS#12 passphrase, and the PIN is
-shown once in a modal dialog with a copy button.
+```console
+$ python3 -m sandbox_ca --data-dir .sandbox-ca --port 8443 --manual
+```
+
+The sandbox provides:
+
+- real TLS, with a server certificate issued by its own test CA;
+- the same XML, PPPK, status, download and revocation paths as the legacy
+  listener;
+- persistent CA hierarchy, pending CSRs and issued certificates in
+  `<data-dir>/state.json`, so a restart does not lose a certificate;
+- an authenticated admin API and browser console at
+  `https://localhost:8443/__sandbox__/ui?token=...`;
+- approve, sign, reject and revoke operations, validity settings, captured
+  requests and fault injection;
+- a Java patcher that replaces CertWizard's bundled CA certificates, SHA-256
+  pins and configured URLs.
+
+Typical admin commands:
+
+```console
+$ python3 -m sandbox_ca.admin --data-dir .sandbox-ca status
+$ python3 -m sandbox_ca.admin --data-dir .sandbox-ca approve 1001
+$ python3 -m sandbox_ca.admin --data-dir .sandbox-ca sign 1001
+$ python3 -m sandbox_ca.admin --data-dir .sandbox-ca reject 1001 --reason "wrong RA"
+```
+
+To run the real Java client against it:
+
+```console
+$ python3 -m sandbox_ca.java_kit \
+    --data-dir .sandbox-ca \
+    --jar /path/to/CertWizard-jar-with-dependencies.jar \
+    --out /tmp/CertWizard-sandbox.jar
+$ java -jar /tmp/CertWizard-sandbox.jar --self-test
+$ java -jar /tmp/CertWizard-sandbox.jar /tmp/certwizard-sandbox-data
+```
+
+`sandbox_ca/README.md` covers the admin console, Java lifecycle and persistent
+state in more detail.
+
+---
+
+## The ACME v2 wrapper
+
+The ACME wrapper is an RFC 8555 server that lets certbot and other ACME clients
+use the same CA state as the legacy listener. It is implemented in
+`sandbox_ca/acme.py` and starts alongside the legacy listener:
+
+```console
+$ python3 -m sandbox_ca \
+    --data-dir .sandbox-ca \
+    --port 8443 \
+    --acme-port 14000 \
+    --acme-challenge-mode auto
+```
+
+The output includes both URLs:
+
+```text
+URL:              https://localhost:8443
+ACME directory:   https://localhost:14000/acme/directory
+```
+
+The legacy endpoint remains available. The ACME endpoint is separate, so
+migration does not require a flag day and both client generations can coexist.
+
+### How an ACME order maps onto the UK-CA model
+
+The wrapper does not issue from a second CA. It translates ACME objects into
+the sandbox CA's existing CSR, signing, certificate and revocation records:
+
+| ACME operation | CA operation |
+|---|---|
+| `new-order` identifiers | order and authorization records; expected DNS SANs |
+| `finalize` CSR | a CA CSR record is created and passed to the CA signing path |
+| auto-sign mode | order becomes `valid`; certificate id is the CA certificate id |
+| manual CA mode | order stays `processing`; an operator signs the CA record; the next order poll sees `valid` |
+| certificate download | CA leaf plus issuing CA PEM chain |
+| `revoke-cert` | CA certificate record status becomes `REVOKED` |
+| account contact | e-mail stored with the CA CSR record |
+
+This keeps policy, RA behaviour and certificate data in the legacy CA model
+rather than creating an ACME-only shadow CA.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/acme/directory` | service directory and metadata |
+| `GET`/`HEAD` | `/acme/new-nonce` | fresh `Replay-Nonce` |
+| `POST` | `/acme/new-account` | create/find an account using a JWS with `jwk` |
+| `POST` | `/acme/new-order` | order DNS identifiers |
+| `GET`/`POST` | `/acme/order/<id>` | order status (POST-as-GET) |
+| `GET`/`POST` | `/acme/authz/<id>` | authorization and challenges |
+| `GET`/`POST` | `/acme/chall/<id>` | challenge status; POST starts validation |
+| `POST` | `/acme/finalize/<id>` | submit a base64url DER CSR |
+| `GET`/`POST` | `/acme/cert/<id>` | PEM leaf and issuing chain |
+| `POST` | `/acme/revoke-cert` | revoke a certificate |
+| `POST` | `/acme/key-change` | not supported (501 problem document) |
+| `GET` | `/acme/terms` | sandbox terms text |
+
+POSTs use JWS (`application/jose+json`). Supported account algorithms are
+`RS256`/`RS384`/`RS512`, `ES256`/`ES384`/`ES512` and `EdDSA`. Nonces are
+one-shot and expire after ten minutes; a `badNonce` response includes a fresh
+`Replay-Nonce`.
+
+### Challenges and certbot
+
+| Mode | Behaviour |
+|---|---|
+| `auto` | A challenge POST immediately marks it valid. No HTTP fetch. Useful for a self-contained local sandbox. |
+| `http` | The wrapper fetches `http://<identifier>:<port>/.well-known/acme-challenge/<token>` and compares it to `<token>.<account-key-thumbprint>`. |
+| `manual` | A challenge stays pending until an operator or a custom driver validates it through the ACME object API. |
+
+Wildcard orders use `dns-01`; `auto` validates them immediately. There is no
+DNS provider hook. HTTP validation works with certbot standalone and nginx
+webroot.
+
+A local certbot run:
+
+```console
+$ certbot certonly \
+    --standalone \
+    --non-interactive \
+    --agree-tos \
+    -m test@example.org \
+    --server https://localhost:14000/acme/directory \
+    --no-verify-ssl \
+    --http-01-port 18080 \
+    -d sandbox.example
+```
+
+`--no-verify-ssl` is only needed because the sandbox uses a private test CA.
+For a realistic validation use `--acme-challenge-mode http` and a name that
+resolves to the machine running certbot. To verify the ACME TLS endpoint, point
+the client's CA bundle at `.sandbox-ca/root.pem` instead.
+
+nginx is not an ACME client itself: certbot (or another ACME client) obtains the
+certificate, and nginx serves `fullchain.pem`/`privkey.pem`. See
+[`docs/ACME.md`](docs/ACME.md) for nginx and webroot examples.
+
+### External Account Binding and persistence
+
+RFC 8555 §7.3.4 EAB is supported. Configure an institutional key identifier and
+base64url HMAC secret:
+
+```console
+$ python3 -m sandbox_ca \
+    --data-dir .sandbox-ca \
+    --acme-port 14000 \
+    --acme-eab-kid stfc-test \
+    --acme-eab-hmac-key "$EAB_HMAC_KEY"
+```
+
+When EAB is configured the directory advertises
+`externalAccountRequired: true`, and `new-account` without a valid binding is
+rejected. HS256/HS384/HS512 are supported.
+
+ACME accounts, orders, authorizations, challenges and certificate mappings are
+persisted atomically to `<data-dir>/acme-state.json` (mode `0600`) and restored
+on restart. Nonces are deliberately ephemeral, so restart the wrapper on the
+same port if existing `kid` URLs must remain valid.
+
+### ACME limits
+
+The wrapper is a test service, not a production ACME deployment. It has:
+
+- no ARI or ACME profiles;
+- no key-change;
+- in-memory nonces;
+- no DNS provider hook for `dns-01`;
+- no CAA, OCSP or CRL processing;
+- no rate limiting;
+- a local test CA that does not perform real domain or identity validation.
+
+Do not expose it to the Internet without a reverse proxy, authentication
+boundary, firewall and the production controls described in
+[`docs/STFC-ACME-MODERNISATION.md`](docs/STFC-ACME-MODERNISATION.md).
 
 ---
 
@@ -217,250 +454,216 @@ Global options: `--config PATH`, `--json`, `-q/--quiet`, `-v`, `--debug`.
 
 | Command | Purpose |
 |---|---|
-| `pycert init [DIR]` | create config, copy/pin the CA chain, create the saved secret |
+| `pycert init [DIR]` | create configuration, copy/pin the CA chain and create the saved secret |
 | `pycert config show\|check\|path\|set` | inspect, validate, locate or edit configuration |
 | `pycert ping` | check connectivity and show the TLS peer |
-| `pycert ras` | list RAs published by the CA (`*` = preferred) |
-| `pycert info` | message of the day, policy, CA certificates |
+| `pycert ras` | list RAs published by the CA |
+| `pycert info` | message of the day, policy and CA certificates |
 | `pycert request CN [--type user\|host]` | generate key + CSR and submit |
 | `pycert wait ALIAS` | poll until signed, then download and export |
 | `pycert status [ALIAS] [--refresh]` | local state, optionally refreshed from the CA |
-| `pycert list` | all requests (also audits file permissions) |
+| `pycert list` | all requests and permission audit |
 | `pycert show ALIAS` | full detail for one request |
 | `pycert download ALIAS` | download, verify, store and export |
-| `pycert export ALIAS [--out FILE]` | (re-)write the PKCS#12 |
-| `pycert verify ALIAS` | key/certificate/chain/PKCS#12 checks (exit 4 on failure) |
+| `pycert export ALIAS [--out FILE]` | write or rewrite the PKCS#12 |
+| `pycert verify ALIAS` | key, certificate, chain and PKCS#12 checks (exit 4 on failure) |
 | `pycert renew ALIAS` | renewal with a new key, PPPK-authenticated |
-| `pycert renew --due DAYS` | renew every certificate expiring within DAYS (`--dry-run` to preview) |
-| `pycert proxy ALIAS [--hours N] [--remove]` | create/verify a short-lived RFC 3820 proxy bundle |
-| `pycert watch [--once]` | poll pending requests continuously and export them as they are signed |
+| `pycert renew --due DAYS` | renew certificates expiring within DAYS (`--dry-run` to preview) |
+| `pycert proxy ALIAS [--hours N] [--remove]` | create and verify an RFC 3820 proxy bundle |
+| `pycert watch [--once]` | poll pending requests continuously and export them |
 | `pycert revoke ALIAS --reason R` | revoke at the CA |
 | `pycert import FILE.p12` | import an existing bundle |
 | `pycert install ALIAS [--dir ~/.globus]` | write `usercert.pem` / `userkey.pem` |
 | `pycert delete ALIAS` | delete the local files for a request |
 | `pycert secret set\|get\|rm\|list\|test` | manage the saved passphrase |
 | `pycert doctor [--offline]` | diagnose configuration, chain, permissions, secrets, DNS, TLS and clock skew |
-| `pycert selftest` | offline self-checks of TOML, key generation, CSR, PKCS#12 and the bundled chain |
+| `pycert selftest` | offline checks of TOML, keys, CSR, PKCS#12 and bundled chain |
 | `pycert gui` | start the graphical interface |
 
-`request`, `renew` and `wait` accept `--wait`, `--timeout` (default 24h),
-`--interval` (default 60s), `--no-export` and `--allow-unverified-chain`.
+`request`, `renew` and `wait` accept `--wait`, `--timeout`, `--interval`,
+`--no-export` and `--allow-unverified-chain`.
 
-PIN options: `--generate-pin` (default when there is no terminal), `--pin-file`,
-`--pin-stdin`, or an interactive double prompt. `--pin VALUE` works but is
-visible in the process list and prints a warning.
-
-Passphrase options for `import`/`export`/`download`: `--password-file`,
-`--password-stdin`, or the saved secret (the default).
-
-### Network behaviour
-
-The CA client is built on a hardened transport (`pycert/transport.py`) rather
-than raw `urllib` calls:
-
-* **deadlines**: every request has a total deadline (`ca.deadline`) in addition
-  to socket timeouts; headers and body are read in bounded chunks so a trickling
-  server cannot pin a thread;
-* **DNS**: resolution has its own timeout (`ca.dns_timeout`), a small positive
-  cache, and returns a clear `dns` error instead of hanging;
-* **framing**: short `Content-Length`, malformed chunks, bad status lines,
-  oversized headers/bodies and compressed responses are hard errors, never
-  silently truncated data;
-* **retries**: only idempotent requests (GET/HEAD and the status lookup) are
-  retried, with exponential backoff and full jitter; `408`, `425`, `429`, `500`,
-  `502`, `503`, `504` are retryable and `Retry-After` is honoured (capped);
-  submissions and revocations are **never** retried;
-* **redirects**: at most `ca.max_redirects` same-host redirects, never for POST,
-  never to plaintext or another host;
-* **cancellation**: a stop event is honoured before connecting and between body
-  chunks, so the GUI's Cancel and Ctrl-C are responsive;
-* **clock skew**: the server's `Date` header is used to correct the timestamp in
-  the PPPK challenge, so a slightly wrong local clock does not break renewals.
-
-Tune these with `ca.connect_timeout`, `ca.deadline`, `ca.dns_timeout`,
-`ca.retries`, `ca.max_redirects`, `ca.max_body_bytes`, `ca.max_header_bytes`,
-`ca.backoff_base` and `ca.backoff_cap` — see
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Renewal definition options include `--email`, `--san-dns`, `--san-email`,
+`--san-ip`, `--clear-san-dns`, `--clear-san-email`, `--clear-san-ip`,
+`--key-algorithm`, `--rsa-bits` and `--ec-curve`. The certificate type is
+preserved during renewal; changing a user certificate into a host certificate
+is a new request, not a renewal. See [`docs/CERTIFICATES.md`](docs/CERTIFICATES.md).
 
 ### Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | error (configuration, crypto, CA rejection, not found) |
-| 2 | command line usage error |
-| 3 | timed out waiting for signing — the request is still stored and can be polled again |
+| 1 | configuration, crypto, CA rejection or not-found error |
+| 2 | command-line usage error |
+| 3 | timed out waiting for signing; the request remains stored and can be polled again |
 | 4 | certificate chain did not validate |
-
-### Automation
-
-`pycert status --refresh` polls every pending request once and is safe to run
-from cron. A typical crontab entry:
-
-```cron
-# every 15 minutes: finish any request the RA has approved
-*/15 * * * * /home/you/.local/bin/pycert -q status --refresh >>/home/you/.local/state/pycert.log 2>&1
-```
-
-`examples/` contains a launchd plist for macOS and a systemd timer for Linux, plus
-an example annotated configuration.
 
 ---
 
 ## What pyCert writes
 
-One directory per request under `paths.data_dir`
-(default `~/.local/share/pycert`), mode 0700, files mode 0600:
+One directory per request under `paths.data_dir` (default
+`~/.local/share/pycert`), mode `0700`, files mode `0600`:
 
-```
+```text
 requests/jane-doe/
-├── state.json        # metadata and full history (no secrets, no PIN)
-├── key.pem           # PKCS#8, encrypted with the saved secret
-├── request.csr       # the submitted PKCS#10 request
-├── cert.pem          # issued leaf certificate
-├── chain.pem         # issuers, leaf-first
-├── fullchain.pem     # leaf + issuers
-├── jane_doe.p12      # leaf + chain + key, PBES2/AES-256, HMAC-SHA256
-├── key.next.pem      # only while a renewal is in flight
-├── request.next.csr  # only while a renewal is in flight
-└── previous/         # archived files from earlier renewals
+├── state.json        metadata and history (no secrets or PIN)
+├── key.pem           PKCS#8, encrypted with the saved secret
+├── request.csr       submitted PKCS#10 request
+├── cert.pem          issued leaf certificate
+├── chain.pem         issuers, leaf-first
+├── fullchain.pem     leaf + issuers
+├── jane_doe.p12      leaf + chain + key (PBES2/AES-256/HMAC-SHA256)
+├── key.next.pem      only while a renewal is in flight
+├── request.next.csr  only while a renewal is in flight
+├── proxy.pem         optional RFC 3820 proxy bundle
+└── previous/         archived files from earlier renewals
 ```
 
 The PKCS#12 passphrase lives in the configured secret backend (macOS Keychain,
-Freedesktop Secret Service, an external password manager, or a 0600 file) and is
-never written to the configuration or the state files.
+Freedesktop Secret Service, an external password manager, or a `0600` file) and
+is never written to configuration or state files.
 
 ---
 
 ## Security
 
-Read [SECURITY.md](SECURITY.md) for the threat model. In short:
+See [`SECURITY.md`](SECURITY.md) for the full threat model. In short:
 
 - TLS is verified by default against the pinned CA chain, with optional leaf
   pinning and a minimum of TLS 1.2; plaintext HTTP must be explicitly enabled.
-- Certificates are only accepted if their public key matches the generated key,
-  their chain reaches a configured anchor, every signature verifies, and the
-  validity window and name constraints hold.
+- Certificates are accepted only when the public key matches the generated key,
+  the chain reaches a configured anchor, every signature verifies, and validity
+  and name constraints hold.
 - MD5 and SHA-1 signatures are refused; RSA keys must be at least 2048 bits.
 - PKCS#12 uses PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC and an HMAC-SHA-256
-  integrity MAC (the modern OpenSSL default), not CertWizard's legacy RC2/3DES.
-- Private keys and `.p12` files are written atomically with mode 0600 in 0700
-  directories; the CLI audits permissions in `pycert list`.
+  integrity MAC, not CertWizard's legacy RC2/3DES.
+- Private keys and `.p12` files are written atomically with mode `0600` in
+  `0700` directories; `pycert list` audits permissions.
 - XML responses are size-limited and DOCTYPE/ENTITY declarations are rejected.
-- PINs are never stored, logged or passed on the command line by default.
+- PINs are never stored, logged, or passed on the command line by default.
 - The saved passphrase is kept in the OS keychain where available; the macOS
   backend passes it on stdin to `security -i`, never in `argv`.
+- Proxy bundles contain a private key and are written `0600`; remove them when
+  the delegated job finishes. See [`docs/PROXY.md`](docs/PROXY.md).
 
 ---
 
 ## Compatibility notes
 
-The CA protocol is undocumented; pyCert implements what CertWizard does (see
-[docs/PROTOCOL.md](docs/PROTOCOL.md)). The listener contract and a runnable
-sandbox for the real Java client are documented in
-[docs/CA_LISTENER.md](docs/CA_LISTENER.md). Points to be aware of:
+The legacy protocol is undocumented and pyCert follows observed CertWizard
+behaviour; [`docs/PROTOCOL.md`](docs/PROTOCOL.md) records the exact wire format.
 
-- **PIN hash:** the current server compares the RA’s hash with a SHA-1 hash, so
-  `pycert` hashes the PIN with SHA-1 (upper-case hex), like the Java client.
-  `csr.pin_hash = "sha256"` exists for future server changes and prints a warning.
-- **PPPK:** host requests and renewals authenticate with the RSA private
-  exponent. Only RSA certificates can authenticate these requests; ECDSA client
-  keys are fine for ordinary user requests but cannot be used for renewal with
-  this server.
+- **PIN hash:** the current server compares the RA hash with SHA-1, so pyCert
+  hashes the PIN with SHA-1 (upper-case hex), like CertWizard.
+- **PPPK:** only RSA certificates can authenticate host requests and renewals;
+  ECDSA keys are fine for ordinary user requests.
 - **Host requests** need an existing, currently valid certificate (`--auth`).
-- **Email:** for user certificates the contact e-mail is also the SAN e-mail, and
-  it must match the `<Email>` element (the server checks).
+- **E-mail:** for user certificates the contact e-mail is also a SAN e-mail and
+  must match the XML `<Email>` element.
 - **Renewal subject:** the existing subject is preserved, with attributes
-  re-ordered to OpenCA’s expectation (CN, L, OU, O, C, e-mail first).
-- **AIA fetching** is enabled for missing intermediates. Fetched certificates are
-  signature-checked before use, so an untrusted HTTP AIA URL cannot inject a
-  bogus issuer.
+  ordered for OpenCA.
+- **AIA fetching** is enabled for missing intermediates; fetched certificates
+  are signature-checked before use.
+
+### Python support
+
+pyCert runs on **Python 3.6 and newer**. It avoids `dataclasses`, `tomllib`,
+`datetime.fromisoformat` and other newer APIs; `pycert/compat.py`,
+`pycert/toml.py` and `pycert/_dataclasses.py` provide fallbacks. Every package
+file is checked against the 3.6 grammar by `tools/check_py36.py`, and the test
+suite runs against Python 3.6.15 with `cryptography 3.3.2` in a container.
+
+Python 3.6 is end-of-life and the newest compatible `cryptography` is 3.3.x;
+use Python 3.9+ for new deployments.
 
 ---
 
-## Development
+## Development and tests
 
 ```console
 $ make dev            # virtualenv with pytest, ruff and vermin
-$ make test           # 7,360 tests
+$ make test           # full test suite (7,360 tests)
 $ make coverage       # full suite + 100% non-GUI line coverage gate
 $ make lint           # ruff
 $ make check-py36     # grammar + runtime feature checks for Python 3.6
-$ make build          # wheel + sdist
+$ make build          # wheel and sdist
 ```
 
-The test suite includes a **mock CA** (`sandbox_ca/mock_ca.py`, re-exported as
-`tests/mock_ca.py`) that speaks the same
-XML protocol over real TLS, with an RSA root signing an ECDSA intermediate, and a
-raw fault-injection server (`tests/raw_server.py`) that can send malformed
-status lines, truncated bodies, slow bytes, resets, redirects and oversized
-responses. Tests cover submission, PPPK challenges, polling, certificate
-download, chain building (including AIA fetching over HTTP), renewal, revocation,
-PKCS#12 export, the Python 3.6 fallbacks and a differential TOML parser check
-against `tomllib`. Generated `.p12` files and certificates are cross-checked with
-the `openssl` command line where available.
+The suite includes:
 
-Proxy bundles (RFC 3820) and user/host certificate definitions are documented in
-[`docs/PROXY.md`](docs/PROXY.md) and [`docs/CERTIFICATES.md`](docs/CERTIFICATES.md).
+- a **mock legacy CA** speaking XML/PPPK over real TLS, with fault injection;
+- end-to-end CLI tests for every action;
+- Java wire-parity fixtures and an optional live CertWizard differential test;
+- 3,003 ACME cases covering JWS, orders, challenges, EAB, persistence, CSR
+  matching, revocation and routing;
+- 1,000 legacy listener/XML/PPPK cases;
+- chain building, AIA fetching, PKCS#12, Python 3.6 fallbacks, proxy bundles and
+  a differential TOML parser check against `tomllib`.
 
-For running the **real Java CertWizard** against a full local CA (persistent
-requests/certificates, RA approve/sign/reject, revocation, browser admin console
-and a Java jar/source patcher), see [`sandbox_ca/README.md`](sandbox_ca/README.md)
-and [`docs/CA_LISTENER.md`](docs/CA_LISTENER.md). The same mock CA also exposes
-an RFC 8555 ACME v2 endpoint for certbot/nginx; see
-[`docs/ACME.md`](docs/ACME.md) and the detailed STFC modernisation dossier
-[`docs/STFC-ACME-MODERNISATION.md`](docs/STFC-ACME-MODERNISATION.md).
+The optional real-client tests run when `CERTWIZARD_JAR` or `CERTBOT_BIN` is
+set:
 
-`tests/test_certwizard_wire_parity.py` compares pyCert's captured requests with
-the Java project's golden wire fixtures for every operation.  If
-`CERTWIZARD_JAR` points at a CertWizard jar (or the usual local checkout is
-present), it also runs the real Java client's complete lifecycle against the
-same sandbox CA and compares the two request multisets.
-
-`tests/test_acme_emulation.py`, `tests/test_acme_matrix.py` and
-`tests/test_acme_deep_matrix.py` add 1,000+ ACME v2/CA-emulation cases, and
-`tests/test_ca_server_matrix.py` adds 1,000 legacy listener/XML/PPPK cases
-and `tests/test_acme_eab_persistence.py` adds 1,000 EAB/durable-state/routing
-cases
-(routing, identifier validation, JWS algorithms/rejection, CSR matching, order
-lifecycle, HTTP-01, challenges, issuance, revocation, wildcard, CA
-manual-signing and legacy status/download/revoke behaviour).
-`tests/test_acme_certbot.py` runs a real certbot when `CERTBOT_BIN` is set.
-
+```console
+$ CERTWIZARD_JAR=/path/to/CertWizard.jar .venv/bin/pytest -q tests/test_certwizard_wire_parity.py
+$ CERTBOT_BIN=/path/to/certbot .venv/bin/pytest -q tests/test_acme_certbot.py
 ```
+
+Project layout:
+
+```text
 src/pycert/
-├── config.py          TOML configuration, validation, chain pins
-├── ca.py              HTTP/TLS client, PPPK, XML parsing
+├── config.py          TOML configuration, validation and chain pins
+├── ca.py              legacy CA client, PPPK, XML parsing
+├── transport.py       hardened HTTP(S): deadlines, retries, limits, DNS, TLS
 ├── chain.py           chain building and path validation
-├── certs.py           certificate/key helpers, descriptions, names
+├── certs.py           certificate/key helpers
 ├── csr.py             PKCS#10 construction
 ├── p12.py             PKCS#12 read/write
-├── pkcs12_writer.py   modern PKCS#12 container (PBES2/AES-256, HMAC-SHA256)
-├── asn1.py            minimal DER encoder for the PKCS#12 container
-├── store.py           on-disk state, permissions, locking
+├── pkcs12_writer.py   modern PKCS#12 container
+├── store.py           on-disk state, permissions and locking
 ├── secrets_store.py   keychain/secret-service/file/command backends
 ├── workflow.py        request → wait → download → export → renew → revoke
-├── transport.py       hardened HTTP(S): deadlines, retries, limits, DNS, TLS
-├── toml.py            TOML parser for Python 3.6
-├── compat.py          version/API compatibility helpers
-├── diagnostics.py     doctor / selftest
+├── proxy.py           RFC 3820 proxy bundles
+├── diagnostics.py     doctor and selftest
 ├── cli.py             argparse front-end
 └── gui.py             Tkinter front-end
+
+sandbox_ca/
+├── mock_ca.py         legacy listener implementation and fault injection
+├── server.py          persistent sandbox, admin API and ACME startup
+├── acme.py            RFC 8555 ACME v2 wrapper
+├── java_kit.py        CertWizard JAR/URL/CA patcher
+└── admin.py           admin CLI
 ```
+
+Further documentation:
+
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — configuration reference
+- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — legacy wire protocol
+- [`docs/CA_LISTENER.md`](docs/CA_LISTENER.md) — legacy listener contract
+- [`docs/ACME.md`](docs/ACME.md) — ACME endpoints, certbot and nginx
+- [`docs/STFC-ACME-MODERNISATION.md`](docs/STFC-ACME-MODERNISATION.md) — production architecture, policy and migration dossier
+- [`docs/PROXY.md`](docs/PROXY.md) — RFC 3820 proxy bundles
+- [`docs/CERTIFICATES.md`](docs/CERTIFICATES.md) — user/host definitions and renewal changes
+- [`sandbox_ca/README.md`](sandbox_ca/README.md) — sandbox admin console and Java kit
+
+---
 
 ## Limitations and non-goals
 
-- No OCSP/CRL checking of issued certificates (the CA publishes CRL URLs; use
-  `openssl verify -crl_check` with the CRL if you need revocation checking).
-- One CA profile per configuration file (use `--config` for several).
-- No bulk host certificate requests (`/CSRs` with multiple `<CSR>` elements).
-- No Windows installer; the CLI and GUI run wherever Python 3.6+ and Tk are
+- No OCSP/CRL checking of issued certificates; the CA publishes CRL URLs, and
+  `openssl verify -crl_check` can be used with the CRL if needed.
+- One CA profile per configuration file; use `--config` for multiple profiles.
+- No bulk host requests (`/CSRs` with multiple `<CSR>` elements).
+- No Windows installer; the CLI and GUI run where Python 3.6+ and Tk are
   available.
-- The protocol implementation follows observed CertWizard behaviour, not a
-  published specification; see docs/PROTOCOL.md for the exact wire format.
-- On Python 3.6, `cryptography` cannot be newer than 3.3.x (upstream EOL), so
-  security fixes may require a newer Python; pyCert warns about this in
-  `pycert doctor`.
+- The legacy protocol implementation follows observed CertWizard behaviour, not
+  a published specification.
+- The sandbox CA and ACME wrapper are test systems, not a production CA.
+- On Python 3.6, `cryptography` cannot be newer than 3.3.x; use a newer Python
+  for security updates.
 
 ## Licence
 
