@@ -1187,7 +1187,9 @@ class BundleDialog(tk.Toplevel):
         self.bundle: "bundles.CertificateBundle | None" = None
         self._loaded_password = ""
         self._path = path
-        self.title("Inspect certificate bundle")
+        parent._bundle_dialog = self
+        self.bind("<Destroy>", self._on_destroy)
+        self.title("Java bundle - open, save or update")
         self.transient(parent)
         self.geometry("1120x720")
         self.minsize(820, 520)
@@ -1207,34 +1209,45 @@ class BundleDialog(tk.Toplevel):
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(1, weight=1)
 
-        ttk.Label(outer, text="Certificate bundle", font=("TkDefaultFont", 15, "bold")).grid(
-            row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
+        ttk.Label(outer, text="Java certificate bundle", font=("TkDefaultFont", 15, "bold")).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 4)
         )
+        ttk.Label(
+            outer,
+            text=(
+                "Open a CertWizard cakeystore.pkcs12, a Java JKS/JCEKS trust store, "
+                "or a PEM/DER bundle.\n"
+                "The table shows every certificate. Save all certs or update the "
+                "bundle with the buttons below."
+            ),
+            style="Subtle.TLabel",
+            justify="left",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
-        ttk.Label(outer, text="File").grid(row=1, column=0, sticky="e", padx=(0, 8))
-        ttk.Entry(outer, textvariable=self.path_var).grid(row=1, column=1, sticky="we")
-        ttk.Button(outer, text="Browse...", command=self._browse).grid(row=1, column=2, padx=(8, 0))
+        ttk.Label(outer, text="File").grid(row=2, column=0, sticky="e", padx=(0, 8))
+        ttk.Entry(outer, textvariable=self.path_var).grid(row=2, column=1, sticky="we")
+        ttk.Button(outer, text="Browse...", command=self._browse).grid(row=2, column=2, padx=(8, 0))
 
-        ttk.Label(outer, text="Passphrase").grid(row=2, column=0, sticky="e", padx=(0, 8), pady=(8, 0))
+        ttk.Label(outer, text="Passphrase").grid(row=3, column=0, sticky="e", padx=(0, 8), pady=(8, 0))
         self.password_entry = ttk.Entry(
             outer, textvariable=self.password_var, show="*", width=36
         )
-        self.password_entry.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        self.password_entry.grid(row=3, column=1, sticky="w", pady=(8, 0))
         ttk.Checkbutton(
             outer,
             text="Show",
             variable=self.show_password,
             command=self._toggle_password,
-        ).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ).grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
         self.load_button = ttk.Button(outer, text="Decode", command=self.load)
-        self.load_button.grid(row=2, column=3, sticky="e", pady=(8, 0))
+        self.load_button.grid(row=3, column=3, sticky="e", pady=(8, 0))
 
         self.summary_label = ttk.Label(outer, text="Choose a file and decode it.", style="Subtle.TLabel")
-        self.summary_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 4))
+        self.summary_label.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 4))
 
         paned = ttk.PanedWindow(outer, orient="vertical")
-        paned.grid(row=4, column=0, columnspan=4, sticky="nsew")
-        outer.rowconfigure(4, weight=1)
+        paned.grid(row=5, column=0, columnspan=4, sticky="nsew")
+        outer.rowconfigure(5, weight=1)
         tree_frame = ttk.Frame(paned)
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
@@ -1266,21 +1279,25 @@ class BundleDialog(tk.Toplevel):
         paned.add(detail_frame, weight=2)
 
         buttons = ttk.Frame(outer)
-        buttons.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        buttons.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         self.copy_button = ttk.Button(buttons, text="Copy selected PEM", command=self._copy_pem)
         self.copy_button.pack(side="left")
         self.copy_all_button = ttk.Button(buttons, text="Copy all PEM", command=self._copy_all)
         self.copy_all_button.pack(side="left", padx=(8, 0))
-        self.save_button = ttk.Button(buttons, text="Save all PEM...", command=self._save_all)
+        self.save_button = ttk.Button(buttons, text="Save all certs (PEM)...", command=self._save_all)
         self.save_button.pack(side="left", padx=(8, 0))
         self.save_java_button = ttk.Button(
-            buttons, text="Save Java PKCS#12...", command=self._save_java
+            buttons, text="Save all certs (Java PKCS#12)...", command=self._save_java
         )
         self.save_java_button.pack(side="left", padx=(8, 0))
-        self.update_button = ttk.Button(buttons, text="Update bundle...", command=self._update_bundle)
+        self.update_button = ttk.Button(buttons, text="Update Java bundle...", command=self._update_bundle)
         self.update_button.pack(side="left", padx=(8, 0))
         ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
         self._set_bundle_buttons(False)
+
+    def _on_destroy(self, _event=None) -> None:
+        if getattr(self.parent, "_bundle_dialog", None) is self:
+            self.parent._bundle_dialog = None
 
     def _toggle_password(self) -> None:
         self.password_entry.configure(show="" if self.show_password.get() else "*")
@@ -1548,6 +1565,7 @@ class PyCertApp(tk.Tk):
         self._dark = _resolve_dark(self.appearance_mode)
         self.appearance_var = tk.StringVar(value=self.appearance_mode)
         self._appearance_after: "str | None" = None
+        self._bundle_dialog: "BundleDialog | None" = None
 
         self.title(f"{APP_TITLE} - {self.cfg.profile}")
         self.geometry("1220x800")
@@ -1803,6 +1821,25 @@ class PyCertApp(tk.Tk):
         file_menu.add_command(label="Quit", command=self._on_close)
         menu.add_cascade(label="File", menu=file_menu)
 
+        bundles_menu = tk.Menu(menu, tearoff=False)
+        bundles_menu.add_command(
+            label="Open old Java bundle...", command=self.inspect_bundle_dialog
+        )
+        bundles_menu.add_separator()
+        bundles_menu.add_command(
+            label="Save all certs as PEM...",
+            command=lambda: self._bundle_action("_save_all"),
+        )
+        bundles_menu.add_command(
+            label="Save all certs as Java PKCS#12...",
+            command=lambda: self._bundle_action("_save_java"),
+        )
+        bundles_menu.add_command(
+            label="Update open Java bundle...",
+            command=lambda: self._bundle_action("_update_bundle"),
+        )
+        menu.add_cascade(label="Bundles", menu=bundles_menu)
+
         cert_menu = tk.Menu(menu, tearoff=False)
         cert_menu.add_command(label="Refresh list", command=self.refresh_list)
         cert_menu.add_command(label="Refresh status of all pending", command=self.refresh_pending)
@@ -1850,13 +1887,14 @@ class PyCertApp(tk.Tk):
         help_menu.add_command(label="About pyCert", command=self.show_about)
         menu.add_cascade(label="Help", menu=help_menu)
         self.configure(menu=menu)
-        self._menus = [menu, file_menu, cert_menu, view_menu, appearance_menu, tools_menu, help_menu]
+        self._menus = [menu, file_menu, bundles_menu, cert_menu, view_menu, appearance_menu, tools_menu, help_menu]
         self._style_menus()
 
         modifier = "Command" if sys.platform == "darwin" else "Control"
         self.bind_all(f"<{modifier}-n>", lambda _e: self.new_request())
         self.bind_all(f"<{modifier}-r>", lambda _e: self.refresh_list())
         self.bind_all(f"<{modifier}-e>", lambda _e: self.export_selected())
+        self.bind_all(f"<{modifier}-b>", lambda _e: self.inspect_bundle_dialog())
         self.bind_all(f"<{modifier}-q>", lambda _e: self._on_close())
 
     # -- header ------------------------------------------------------------
@@ -1881,6 +1919,7 @@ class PyCertApp(tk.Tk):
         self.buttons: "dict[str, ttk.Button]" = {}
         definitions = [
             ("new", "New request", self.new_request, "Create a key and submit a CSR"),
+            ("bundle", "Java bundle...", self.inspect_bundle_dialog, "Open, save or update a legacy Java bundle"),
             ("refresh", "Refresh", self.refresh_list, "Re-read the local store"),
             ("wait", "Wait for signing", self.wait_selected, "Poll the CA until the certificate is issued"),
             (
@@ -1912,9 +1951,6 @@ class PyCertApp(tk.Tk):
             button.pack(side="left", padx=(0, 6))
             Tooltip(button, tip)
             self.buttons[name] = button
-        ttk.Button(bar, text="Open bundle", command=self.inspect_bundle_dialog).pack(
-            side="right", padx=(0, 8)
-        )
         ttk.Button(bar, text="Settings", command=lambda: SettingsDialog(self)).pack(side="right")
         self._update_buttons()
 
@@ -1987,6 +2023,9 @@ class PyCertApp(tk.Tk):
             side="left", padx=(8, 0)
         )
         ttk.Button(overview_buttons, text="Open folder", command=self._open_selected_folder).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(overview_buttons, text="Java bundle...", command=self.inspect_bundle_dialog).pack(
             side="left", padx=(8, 0)
         )
         self.notebook.add(overview, text="Overview")
@@ -2492,19 +2531,36 @@ class PyCertApp(tk.Tk):
             return
         RevokeDialog(self, state)
 
-    def inspect_bundle_dialog(self) -> None:
-        """Open a read-only viewer for a Java keystore or certificate bundle."""
-        path = filedialog.askopenfilename(
-            parent=self,
-            title="Inspect Java bundle",
-            filetypes=[
-                ("Java keystore / PKCS#12", "*.p12 *.pfx *.pkcs12 *.jks *.keystore *.jceks"),
-                ("PEM/DER certificates", "*.pem *.crt *.cer *.der *.bundle"),
-                ("All files", "*"),
-            ],
-        )
+    def inspect_bundle_dialog(self, path: "str | Path | None" = None) -> None:
+        """Open the Java bundle viewer/editor."""
+        if path is None:
+            path = filedialog.askopenfilename(
+                parent=self,
+                title="Open old Java bundle",
+                filetypes=[
+                    ("Java keystore / PKCS#12", "*.p12 *.pfx *.pkcs12 *.jks *.keystore *.jceks"),
+                    ("PEM/DER certificates", "*.pem *.crt *.cer *.der *.bundle"),
+                    ("All files", "*"),
+                ],
+            )
         if path:
-            BundleDialog(self, Path(path))
+            dialog = BundleDialog(self, Path(path))
+            self._bundle_dialog = dialog
+
+    def _bundle_action(self, method: str) -> None:
+        dialog = self._bundle_dialog
+        try:
+            exists = dialog is not None and dialog.winfo_exists()
+        except tk.TclError:
+            exists = False
+        if not exists:
+            messagebox.showinfo(
+                "Java bundle",
+                "Open an old Java bundle first (Bundles -> Open old Java bundle...).",
+                parent=self,
+            )
+            return
+        getattr(dialog, method)()
 
     def import_p12_dialog(self) -> None:
         path = filedialog.askopenfilename(

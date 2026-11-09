@@ -100,12 +100,13 @@ download, export, renewal, revocation, with timestamps and details.
 | **Renew** | Creates a new key and a PPPK-authenticated renewal; offers to wait immediately. |
 | **Revoke** | Reason picker plus an explicit confirmation checkbox. |
 | **Open folder** | Reveals the request directory in Finder/Explorer/desktop. |
-| **Open old Java bundle...** | Opens a viewer for all certificates in a legacy Java/PKCS#12/PEM bundle, with save and update actions. |
+| **Java bundle...** | Opens the bundle viewer/editor from the toolbar. |
+| **Bundles → Open old Java bundle...** | Opens a legacy Java/PKCS#12/PEM bundle with save and update actions. |
 
 ### Inspecting a legacy Java bundle
 
-**File → Open old Java bundle...** (or the **Open bundle** toolbar button) opens
-a viewer for:
+**Bundles → Open old Java bundle...**, **File → Open old Java bundle...**, or
+the **Java bundle...** toolbar button opens a viewer for:
 
 * CertWizard `cakeystore.pkcs12` / `.p12` / `.pfx` files;
 * Java JKS and JCEKS trust stores (`.jks`, `.keystore`, `.jceks`);
@@ -118,9 +119,11 @@ and Java alias where available. Selecting a row shows the decoded fields and
 the public certificate PEM.
 
 The viewer never displays private keys. **Copy selected PEM**, **Copy all PEM**
-and **Save all PEM...** operate on certificates only.
+and **Save all certs (PEM)...** operate on certificates only. The **Bundles**
+menu repeats these actions and reports that a bundle must be opened first if
+none is active.
 
-**Save Java PKCS#12...** writes a new bundle containing every certificate and,
+**Save all certs (Java PKCS#12)...** writes a new bundle containing every certificate and,
 when available, the original private key. It uses the legacy
 PBE-SHA1-3DES/SHA-1 profile for compatibility with old Java CertWizard/keytool.
 For CertWizard's multi-entry `cakeystore.pkcs12`, every raw key bag, alias and
@@ -128,7 +131,7 @@ localKeyID is preserved. Because those key bags stay encrypted with the source
 passphrase, Save and Update use the passphrase entered to open the bundle rather
 than prompting for a new one.
 
-**Update bundle...** rewrites an existing PKCS#12 in place after creating a
+**Update Java bundle...** rewrites an existing PKCS#12 in place after creating a
 `<name>.pkcs12.bak` backup. In-place update is intentionally not offered for
 JKS/JCEKS, whose private-key protection pyCert does not reproduce; read those
 and save a new Java PKCS#12 or PEM instead. **File → Import PKCS#12...** remains
@@ -182,6 +185,7 @@ setting produces an error dialog and nothing is changed.
 | `Ctrl/Cmd+N` | New request |
 | `Ctrl/Cmd+R` | Refresh list |
 | `Ctrl/Cmd+E` | Re-export `.p12` |
+| `Ctrl/Cmd+B` | Open old Java bundle |
 | `Ctrl/Cmd+Q` | Quit |
 | `Enter` | Confirm in dialogs |
 | `Esc` | Close a dialog |

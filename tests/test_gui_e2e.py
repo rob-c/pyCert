@@ -118,6 +118,9 @@ def test_gui_new_request_dialog_submit(config, ca, monkeypatch):
         dialog.email_var.set("gui@example.org")
         dialog.ra_var.set("CLRC DL")
         dialog.wait_var.set(False)
+        # Supply a PIN so the modal one-time PIN dialog does not block the test.
+        dialog.generate_pin_var.set(False)
+        dialog.pin_var.set("1234567890AB")
         dialog._submit()
         assert _pump(app, lambda: any(state.cn == "gui user" for state in app.ctx.store.list()), timeout=20)
         assert any(state.cn == "gui user" for state in app.ctx.store.list())

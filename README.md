@@ -194,20 +194,23 @@ The GUI can open a legacy CertWizard PKCS#12 file, a Java JKS/JCEKS trust
 store, or a PEM/DER certificate bundle without importing it first:
 
 1. Start `pycert gui`.
-2. Choose **File → Open old Java bundle...**, or click **Open bundle** on the
-   main toolbar.
+2. Choose **Bundles → Open old Java bundle...**, **File → Open old Java
+   bundle...**, or click the prominent **Java bundle...** button on the main
+   toolbar (shortcut `Cmd/Ctrl+B`).
 3. Select the file and enter its passphrase if required.
 4. Every certificate is listed with its role (`leaf`, `chain`, `trusted` or
    `certificate`), subject, issuer, expiry, key, SHA-256 fingerprint and alias.
    Selecting a row shows the decoded fields and the certificate PEM.
 
-The viewer never displays private keys. Available actions:
+The same actions are available from the **Bundles** menu; if no bundle is open
+they tell you to open one first. The viewer never displays private keys.
+Available actions:
 
 - **Copy selected PEM** and **Copy all PEM**;
-- **Save all PEM...** for every public certificate in the bundle;
-- **Save Java PKCS#12...** to write a new bundle containing every certificate
-  and, when available, the original private key;
-- **Update bundle...** to rewrite an existing PKCS#12 in place. A
+- **Save all certs (PEM)...** for every public certificate in the bundle;
+- **Save all certs (Java PKCS#12)...** to write a new bundle containing every
+  certificate and, when available, all original key entries;
+- **Update Java bundle...** to rewrite an existing PKCS#12 in place. A
   `<name>.pkcs12.bak` backup is created first.
 
 Java-compatible output uses the legacy PBE-SHA1-3DES + SHA-1 PKCS#12 profile
