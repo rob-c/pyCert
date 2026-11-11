@@ -161,6 +161,7 @@ def test_invalid_toml(tmp_path):
 def test_default_config_paths_do_not_include_cwd(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("PYCERT_CONFIG", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)  # set on GitHub's Linux runners
     paths = default_config_paths()
     assert Path.cwd() / "pycert.toml" not in paths
     assert paths[0] == tmp_path / ".config" / "pycert" / "pycert.toml"
@@ -202,3 +203,15 @@ def test_set_list_values(tmp_path):
     assert config.ca.tls_pin_sha256 == ["aa", "bb"]
     config.set("csr.extensions", "san, key_usage")
     assert config.csr.extensions == ["san", "key_usage"]
+
+
+def test_default_data_dir_order(monkeypatch, tmp_path):
+    from pycert.config import default_data_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PYCERT_DATA_DIR", raising=False)
+    assert default_data_dir() == str(tmp_path / ".local" / "share" / "pycert")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert default_data_dir() == str(tmp_path / "xdg" / "pycert")
+    monkeypatch.setenv("PYCERT_DATA_DIR", str(tmp_path / "chosen"))
+    assert default_data_dir() == str(tmp_path / "chosen")

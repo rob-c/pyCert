@@ -21,7 +21,11 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install "ruff>=0.6"
-      - run: ruff check src tests sandbox_ca tools
+      - run: ruff check src tests sandbox_ca tools packaging
+      - name: Shell scripts parse
+        run: |
+          for f in packaging/linux/*.sh packaging/tests/*.sh; do sh -n "$f"; done
+          for f in packaging/macos/*.sh; do bash -n "$f"; done
 
   test:
     needs: lint
@@ -49,7 +53,7 @@ jobs:
       - name: Tests (coverage is combined across every job below)
         env:
           COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}
-        run: pytest -n auto --cov=src/pycert --cov-report=
+        run: pytest -n auto --cov=src/pycert --cov-report= --cov-fail-under=0
       - run: pycert selftest
       - run: pycertwiz --version
       - uses: actions/upload-artifact@v4
@@ -75,17 +79,3 @@ jobs:
       - run: coverage combine .coverage.*
       - run: coverage report --show-missing --skip-covered --fail-under=100
 
-  build:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - run: pip install build
-      - run: python -m build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/

@@ -125,7 +125,7 @@ with `--san-dns`, `--san-email` or `--san-ip`.
 ## Host certificates
 
 CertWizard’s host request is authenticated by an existing user certificate. In
-pyCert:
+pyCertWiz:
 
 ```console
 $ pycert request host.example.ac.uk --type host --auth "old cert" --wait

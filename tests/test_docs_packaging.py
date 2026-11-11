@@ -146,5 +146,7 @@ def test_help_uses_the_name_it_was_run_as(monkeypatch):
 
     monkeypatch.setattr("sys.argv", ["/usr/local/bin/pycertwiz"])
     assert cli.build_parser().prog == "pycertwiz"
+    monkeypatch.setattr("sys.argv", ["/opt/pycertwiz/pyCertWiz"])  # the bundled executable
+    assert cli.build_parser().prog == "pycertwiz"
     monkeypatch.setattr("sys.argv", ["/usr/local/bin/pycert"])
     assert cli.build_parser().prog == "pycert"

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.rob_c.pyCertWiz</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+  <name>pyCertWiz</name>
+  <summary>Certificate manager for the UK e-Science CA and ACME CAs</summary>
+  <description>
+    <p>
+      pyCertWiz requests, renews, exports and deploys user and host certificates
+      from the UK e-Science CA (replacing the Java CertWizard client) and from
+      ACME CAs such as Let's Encrypt. It can use CertWizard's Java keystore as a
+      live store, and never writes a private key without passphrase protection.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.rob_c.pyCertWiz.desktop</launchable>
+  <url type="homepage">https://github.com/rob-c/pyCertWiz</url>
+  <url type="bugtracker">https://github.com/rob-c/pyCertWiz/issues</url>
+  <provides>
+    <binary>pycertwiz</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>

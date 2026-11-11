@@ -1,0 +1,101 @@
+# .deb, .rpm and Arch packages of the bundled pyCertWiz. package.sh fills in
+# the @...@ values.
+# The bundle carries its own Python and Qt, so one package per architecture
+# installs on any distribution whose glibc is at least @GLIBC@, the newest
+# version any file in the bundle needs (package.sh reads it from the bundle).
+name: pycertwiz
+arch: @ARCH@
+platform: linux
+version: @VERSION@
+release: 1
+section: utils
+priority: optional
+maintainer: pyCertWiz project <https://github.com/rob-c/pyCertWiz>
+description: |
+  Certificate manager for the UK e-Science CA and ACME CAs.
+  pyCertWiz requests, renews, exports and deploys user and host certificates
+  from the UK e-Science CA (replacing the Java CertWizard client) and from ACME
+  CAs. Command line (pycertwiz, pycert) and Qt desktop application.
+vendor: pyCertWiz
+homepage: https://github.com/rob-c/pyCertWiz
+license: GPL-2.0-or-later
+
+contents:
+  - src: @BUNDLE@
+    dst: /opt/pycertwiz
+    type: tree
+  - src: /opt/pycertwiz/pyCertWiz
+    dst: /usr/bin/pycertwiz
+    type: symlink
+  - src: /opt/pycertwiz/pyCertWiz
+    dst: /usr/bin/pycert
+    type: symlink
+  - src: packaging/linux/io.github.rob_c.pyCertWiz.desktop
+    dst: /usr/share/applications/io.github.rob_c.pyCertWiz.desktop
+  - src: packaging/linux/io.github.rob_c.pyCertWiz.metainfo.xml
+    dst: /usr/share/metainfo/io.github.rob_c.pyCertWiz.metainfo.xml
+  - src: @ICON@
+    dst: /usr/share/icons/hicolor/256x256/apps/io.github.rob_c.pyCertWiz.png
+  - src: README.md
+    dst: /usr/share/doc/pycertwiz/README.md
+  - src: LICENSE
+    dst: /usr/share/licenses/pycertwiz/LICENSE
+  - src: examples/
+    dst: /usr/share/doc/pycertwiz/examples
+    type: tree
+
+# The command line needs nothing from the system but glibc. The desktop
+# application needs the usual X11/Wayland, OpenGL and font libraries.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= @GLIBC@)
+    recommends:
+      - libegl1
+      - libgl1
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libfontconfig1
+      - libdbus-1-3
+      - libxcb-cursor0
+      - libxcb-icccm4
+      - libxcb-image0
+      - libxcb-keysyms1
+      - libxcb-render-util0
+      - libxcb-shape0
+      - libxcb-xinerama0
+      - fonts-dejavu-core
+  rpm:
+    depends:
+      - glibc >= @GLIBC@
+    # By library, so the names resolve on Fedora, RHEL/AlmaLinux and openSUSE.
+    recommends:
+      - libEGL.so.1()(64bit)
+      - libGL.so.1()(64bit)
+      - libxkbcommon-x11.so.0()(64bit)
+      - libfontconfig.so.1()(64bit)
+      - libdbus-1.so.3()(64bit)
+      - libxcb-cursor.so.0()(64bit)
+      - libxcb-icccm.so.4()(64bit)
+      - libxcb-image.so.0()(64bit)
+      - libxcb-keysyms.so.1()(64bit)
+      - libxcb-render-util.so.0()(64bit)
+  archlinux:
+    depends:
+      - glibc>=@GLIBC@
+    suggests:  # optdepends: what the desktop application needs
+      - "libglvnd: desktop application"
+      - "libxkbcommon-x11: desktop application"
+      - "fontconfig: desktop application"
+      - "dbus: desktop application"
+      - "xcb-util-cursor: desktop application"
+      - "xcb-util-image: desktop application"
+      - "xcb-util-keysyms: desktop application"
+      - "xcb-util-renderutil: desktop application"
+      - "xcb-util-wm: desktop application"
+
+rpm:
+  summary: Certificate manager for the UK e-Science CA and ACME CAs
+  group: Applications/System
+archlinux:
+  packager: pyCertWiz project <https://github.com/rob-c/pyCertWiz>

@@ -39,7 +39,7 @@ from typing import Any
 from cryptography import x509
 
 from . import bundled, certs
-from .errors import ConfigError
+from .errors import ConfigError, ConfigNotFound
 from .util import ensure_dir, normalize_fingerprint
 
 if sys.version_info >= (3, 11):
@@ -839,7 +839,7 @@ def find_config(explicit: "str | Path | None" = None) -> Path:
         if candidate.is_file():
             return candidate
     searched = ", ".join(str(p) for p in default_config_paths())
-    raise ConfigError(f"no configuration file found.\nSearched: {searched}\nRun 'pycert init' to create one.")
+    raise ConfigNotFound(f"no configuration file found.\nSearched: {searched}\nRun 'pycert init' to create one.")
 
 
 def _parse_ca_table(ca_data: dict, where: str, *, name: str, display_name: str, tls_trust: str = "chain") -> CAConfig:

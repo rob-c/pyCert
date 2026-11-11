@@ -28,6 +28,7 @@ from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QKeySequen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
     QDockWidget,
     QFrame,
     QHBoxLayout,
@@ -50,7 +51,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__, certs
 from ..config import load_config
-from ..errors import PyCertError
+from ..errors import ConfigNotFound, PyCertError
 from ..workflow import AppContext
 from . import icons, theme
 from .dialogs import (
@@ -1679,6 +1680,8 @@ def create_application(argv: "list[str] | None" = None) -> QApplication:
     app.setProperty("pycert_ready", True)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
+    # Matches the installed .desktop file, so Linux desktops show the right icon.
+    app.setDesktopFileName("io.github.rob_c.pyCertWiz")
     app.setApplicationVersion(__version__)
     app.setWindowIcon(icons.app_icon())
     app.setQuitOnLastWindowClosed(False)
@@ -1686,14 +1689,85 @@ def create_application(argv: "list[str] | None" = None) -> QApplication:
     return app
 
 
+def open_main_window(config_path: "str | None" = None, *, start_background: bool = True) -> "MainWindow | None":
+    """The main window. On a first run (no configuration anywhere) the setup comes first.
+
+    Returns ``None`` when the user quits the setup instead.
+    """
+    try:
+        return MainWindow(config_path, start_background=start_background)
+    except ConfigNotFound:
+        from .setup import SetupDialog
+
+        dialog = SetupDialog()
+        if _show_modal(dialog) != QDialog.DialogCode.Accepted:
+            return None
+        return MainWindow(str(dialog.config_path), start_background=start_background)
+
+
+def _render_once(app: QApplication, widget: QWidget, settle_seconds: float) -> "Any":
+    import time
+
+    widget.show()
+    deadline = time.monotonic() + settle_seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+    return widget.grab()
+
+
+def check(config_path: "str | None" = None, *, argv: "list[str] | None" = None, settle_seconds: float = 0.5) -> int:
+    """Start the GUI without a user: build the main window, render it once, report, exit.
+
+    Package tests use it (offscreen, or a real X11, Wayland or macOS display) to
+    prove that Qt, its platform plugin and the main window load from the package.
+    Before pyCertWiz is set up, it renders the first-run setup instead.
+    """
+    import PySide6
+    from PySide6.QtCore import qVersion
+
+    app = create_application(argv)
+    collector = MainThreadCollector(app)
+    try:
+        try:
+            window = MainWindow(config_path, start_background=False)
+        except ConfigNotFound:
+            from .setup import SetupDialog
+
+            what, widget = "first-run setup", SetupDialog()
+            image = _render_once(app, widget, settle_seconds)
+            _dispose(widget)
+        except PyCertError as exc:
+            print(f"GUI check failed: {exc}", file=sys.stderr)
+            return 1
+        else:
+            what = "window"
+            image = _render_once(app, window, settle_seconds)
+            window.runner.shutdown()
+            window.runner.wait(5000)
+            window.close()
+        if image.isNull() or image.width() < 100:
+            print(f"GUI check failed: the {what} did not render", file=sys.stderr)
+            return 1
+        print(
+            f"GUI check OK: {app.platformName()} platform, Qt {qVersion()}, PySide6 {PySide6.__version__}, "
+            f"{what} {image.width()}x{image.height()}"
+        )
+        return 0
+    finally:
+        collector.stop()
+
+
 def run(config_path: "str | None" = None, *, argv: "list[str] | None" = None) -> int:  # pragma: no cover - event loop
     app = create_application(argv)
     collector = MainThreadCollector(app)  # garbage (and so widgets) is only freed on the UI thread
     app.aboutToQuit.connect(collector.stop)
     try:
-        window = MainWindow(config_path)
+        window = open_main_window(config_path)
     except PyCertError as exc:
-        QMessageBox.critical(None, APP_NAME, f"Cannot start pyCert:\n\n{exc}\n\nRun 'pycert init' to create a configuration.")
+        QMessageBox.critical(None, APP_NAME, f"Cannot start pyCertWiz:\n\n{exc}")
         return 1
+    if window is None:  # the first-run setup was cancelled
+        return 0
     window.show()
     return app.exec()

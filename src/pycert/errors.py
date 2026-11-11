@@ -14,6 +14,10 @@ class ConfigError(PyCertError):
     """The configuration file is missing, malformed or inconsistent."""
 
 
+class ConfigNotFound(ConfigError):
+    """No configuration exists yet: pyCertWiz has not been set up (first run)."""
+
+
 class SecretError(PyCertError):
     """A secret could not be stored, retrieved or decrypted."""
 

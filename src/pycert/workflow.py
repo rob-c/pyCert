@@ -15,6 +15,7 @@ is then dropped.
 """
 
 import hashlib
+import os
 import random
 import re
 import secrets as secrets_module
@@ -168,6 +169,61 @@ class AppContext:
             fetcher=chain.aia_fetch,
             allow_sha1=profile.ca.allow_sha1,
         )
+
+
+# ---------------------------------------------------------------------------
+# Setting up
+# ---------------------------------------------------------------------------
+
+
+def default_config_dir() -> Path:
+    """Where a new configuration goes: ~/.config/pycert (or $XDG_CONFIG_HOME/pycert)."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return Path(xdg) / "pycert" if xdg else Path.home() / ".config" / "pycert"
+
+
+def create_configuration(
+    directory: "str | Path | None" = None,
+    *,
+    profile: str = "default",
+    email: str = "",
+    ra: str = "",
+    base_url: str = "",
+    backend: str = "",
+    force: bool = False,
+) -> AppContext:
+    """Write a new configuration and its saved secret ('pycert init' and the GUI's first run).
+
+    The configuration goes in *directory* (default :func:`default_config_dir`)
+    with the pinned UK e-Science CA chain. A random secret protecting
+    pyCertWiz's own store is created in the chosen secret backend.
+    """
+    from .config import init_config, validate_config, write_config
+    from .secrets_store import BACKENDS
+
+    target = Path(directory).expanduser() if directory else default_config_dir()
+    if target.suffix.lower() == ".toml":
+        target = target.parent
+    config_path = target / "pycert.toml"
+    if config_path.exists() and not force:
+        raise PyCertError(f"{config_path} already exists (use --force to overwrite)")
+    # Check the choices before anything is written.
+    email = validate_email(email) if email.strip() else ""
+    ra = " ".join(parse_ra(ra)) if ra.strip() else ""
+    if backend and backend not in BACKENDS:
+        raise ConfigError(f"unknown secret backend {backend!r}: use one of " + ", ".join(BACKENDS))
+    config = init_config(target, profile=profile)
+    config.identity.email = email or config.identity.email
+    config.identity.ra = ra or config.identity.ra
+    if base_url:
+        config.ca.base_url = base_url
+    if backend:
+        config.secrets.backend = backend
+    validate_config(config)
+    write_config(config.path, config)
+    ctx = AppContext.from_config(config)
+    ctx.secrets.ensure(config.secrets.account)
+    return ctx
 
 
 # ---------------------------------------------------------------------------

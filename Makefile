@@ -3,7 +3,7 @@ VENV ?= .venv
 BIN := $(VENV)/bin
 JOBS ?= auto
 
-.PHONY: help venv install dev test test-serial coverage lint format check selftest gui screenshots build clean
+.PHONY: help venv install dev test test-serial coverage lint format check selftest gui screenshots build package-macos package-linux package-test clean
 
 help:
 	@echo "make venv         create the virtualenv and install pyCertWiz (editable, with the GUI)"
@@ -17,6 +17,9 @@ help:
 	@echo "make gui          start the desktop application"
 	@echo "make screenshots  regenerate docs/images against a throw-away sandbox CA"
 	@echo "make build        build a wheel and sdist in dist/"
+	@echo "make package-macos   pyCertWiz.app and a .dmg for this Mac, in dist/"
+	@echo "make package-linux   Linux bundle, AppImage, .deb, .rpm, Arch package (Docker; ARCH=x86_64|aarch64)"
+	@echo "make package-test    install the Linux packages in clean containers and test them (IMAGE=, FORMAT=)"
 	@echo "make clean        remove caches and build artefacts"
 
 venv:
@@ -58,6 +61,23 @@ screenshots:
 
 build: dev
 	$(BIN)/python -m build
+
+package-macos:
+	packaging/macos/build-app.sh
+
+# Docker builds for this machine's architecture; ARCH=x86_64 on Apple silicon emulates.
+ARCH ?= $(shell uname -m | sed 's/arm64/aarch64/')
+BUILD_IMAGE = $(if $(filter aarch64,$(ARCH)),almalinux:10,almalinux:8)
+DOCKER_PLATFORM = $(if $(filter aarch64,$(ARCH)),linux/arm64,linux/amd64)
+package-linux:
+	docker run --rm --platform $(DOCKER_PLATFORM) -v "$(CURDIR):/src" -w /src $(BUILD_IMAGE) packaging/linux/build.sh
+	docker run --rm --platform $(DOCKER_PLATFORM) -v "$(CURDIR):/src" -w /src ubuntu:24.04 sh -c \
+		'apt-get update -qq && apt-get install -y -qq curl ca-certificates binutils file >/dev/null && packaging/linux/package.sh $(ARCH)'
+
+IMAGE ?= debian:13
+FORMAT ?= deb
+package-test:
+	packaging/tests/container-test.sh $(IMAGE) $(FORMAT)
 
 clean:
 	rm -rf $(VENV) dist build *.egg-info src/*.egg-info .pytest_cache .ruff_cache .coverage htmlcov

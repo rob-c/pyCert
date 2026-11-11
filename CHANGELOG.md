@@ -101,6 +101,19 @@ CAs, with a new desktop application.
   `XDG_CONFIG_HOME` is searched for the configuration.
 - GitHub Actions CI on Linux and macOS for Python 3.10–3.14. The test suite
   runs in parallel (`pytest -n auto`).
+- **Packages** that carry their own Python and Qt: a macOS app in a `.dmg`
+  (Apple silicon and Intel), and for Linux an AppImage, `.deb`, `.rpm` and
+  Arch package (x86_64 and aarch64), plus a Nix flake. They add a desktop
+  entry, and the bundled executable is both the GUI and the command line.
+  Each package is installed in clean containers of eleven distributions and
+  tested end to end against the sandbox CA, including the GUI on X11. Tagged
+  releases are published to GitHub Releases, with checksums and build
+  provenance, and to PyPI. See [docs/PACKAGING.md](docs/PACKAGING.md).
+- **First-run setup in the GUI.** With no configuration yet, the desktop
+  application asks for the e-mail address, RA and where to keep the saved
+  secret, and writes the same files as `pycert init`, which now shares its
+  code. `pycert gui --check` renders a window once and exits, for package
+  tests.
 
 ### Changed
 

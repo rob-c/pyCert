@@ -30,7 +30,6 @@ from pathlib import Path
 from . import __version__, certs
 from .config import (
     ConfigError,
-    init_config,
     load_config,
     new_acme_profile,
     new_ukca_profile,
@@ -47,6 +46,7 @@ from .workflow import (
     DEFAULT_WAIT_TIMEOUT,
     AppContext,
     RequestSpec,
+    create_configuration,
     create_request,
     download_and_export,
     expiry_warning,
@@ -244,28 +244,17 @@ def _confirm(args, prompt: str, expected: str) -> bool:
 
 def cmd_init(args) -> int:
     console = Console(json_mode=getattr(args, "json", False), quiet=getattr(args, "quiet", False))
-    directory = Path(getattr(args, "directory", None) or (Path.home() / ".config" / "pycert")).expanduser()
-    if directory.suffix.lower() == ".toml":
-        directory = directory.parent
-    config_path = directory / "pycert.toml"
-    if config_path.exists() and not getattr(args, "force", False):
-        raise PyCertError(f"{config_path} already exists (use --force to overwrite)")
-    config = init_config(directory, profile=getattr(args, "profile", "default"))
-    config.identity.email = getattr(args, "email", None) or config.identity.email
-    config.identity.ra = getattr(args, "ra", None) or config.identity.ra
-    base_url = getattr(args, "base_url", None)
-    if base_url:
-        config.ca.base_url = base_url
-        from .config import validate_config
-
-        validate_config(config)
-    backend = getattr(args, "backend", None)
-    if backend:
-        config.secrets.backend = backend
-    write_config(config.path, config)
-
-    ctx = AppContext.from_config(config)
-    ctx.secrets.ensure(config.secrets.account)
+    directory = getattr(args, "directory", None)
+    ctx = create_configuration(
+        Path(directory) if directory else None,
+        profile=getattr(args, "profile", "default"),
+        email=getattr(args, "email", None) or "",
+        ra=getattr(args, "ra", None) or "",
+        base_url=getattr(args, "base_url", None) or "",
+        backend=getattr(args, "backend", None) or "",
+        force=bool(getattr(args, "force", False)),
+    )
+    config = ctx.config
     payload = {
         "config": str(config.path),
         "data_dir": str(config.data_dir),
@@ -1812,6 +1801,10 @@ def cmd_gui(args) -> int:
     problem = gui_available()
     if problem:
         raise PyCertError(problem)
+    if getattr(args, "check", False):
+        from .gui.app import check
+
+        return check(args.config)
     return run_gui(config_path=args.config)  # pragma: no cover - starts the Qt event loop
 
 
@@ -1886,7 +1879,7 @@ def _add_password_options(parser: argparse.ArgumentParser) -> None:
 
 def _program_name() -> str:
     """'pycertwiz' when run under that name, otherwise 'pycert' (both are installed)."""
-    return "pycertwiz" if Path(sys.argv[0]).name.startswith("pycertwiz") else "pycert"
+    return "pycertwiz" if Path(sys.argv[0]).name.lower().startswith("pycertwiz") else "pycert"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2265,6 +2258,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     gui = sub.add_parser("gui", help="start the graphical interface")
     _add_common(gui, suppress=True)
+    gui.add_argument("--check", action="store_true", help="open, render and close the main window, then exit (for tests)")
     gui.set_defaults(func=cmd_gui)
 
     return parser

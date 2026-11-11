@@ -4,12 +4,15 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+# nix build
+/result
+/result-*
 .pytest_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 # never commit local configuration, keys or certificates
-pycert.toml
+/pycert.toml
 secrets.json
 *.p12
 *.pfx

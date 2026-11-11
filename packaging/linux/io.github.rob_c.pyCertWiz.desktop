@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=pyCertWiz
+GenericName=Certificate Manager
+Comment=Request, renew, export and deploy UK e-Science CA and ACME certificates
+Exec=pycertwiz
+Icon=io.github.rob_c.pyCertWiz
+Terminal=false
+Categories=Utility;Security;Qt;
+Keywords=certificate;x509;pkcs12;grid;escience;certwizard;acme;
+StartupWMClass=pyCertWiz

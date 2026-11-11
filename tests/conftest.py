@@ -15,6 +15,19 @@ from pycert.workflow import AppContext  # noqa: E402
 from sandbox_ca.mock_ca import MockCA  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_store(tmp_path_factory, monkeypatch):
+    """No test may write to (or read) the user's real pyCertWiz data directory.
+
+    A test that builds a context without choosing a data directory gets a
+    temporary one; CI runners' XDG variables are cleared so every machine
+    resolves paths the same way. Tests about those defaults set them again.
+    """
+    monkeypatch.setenv("PYCERT_DATA_DIR", str(tmp_path_factory.mktemp("default-data")))
+    for variable in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "PYCERT_CONFIG"):
+        monkeypatch.delenv(variable, raising=False)
+
+
 @pytest.fixture(scope="session")
 def mock_ca():
     ca = MockCA()
@@ -59,6 +72,8 @@ def isolated_home(tmp_path, monkeypatch):
     """Keep the real ~/.local/share/pycert and keychain out of the tests."""
     monkeypatch.setenv("PYCERT_DATA_DIR", str(tmp_path / "home-data"))
     monkeypatch.setenv("HOME", str(tmp_path))
+    for variable in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):  # CI runners set these
+        monkeypatch.delenv(variable, raising=False)
     return tmp_path
 
 

@@ -51,6 +51,15 @@ __all__ = ["SecretStore", "generate_secret", "BACKENDS"]
 BACKENDS = ("auto", "keychain", "secret-service", "keyring", "file", "command", "env", "prompt")
 
 
+def auto_backend() -> str:
+    """The backend that ``auto`` chooses on this system."""
+    if platform.system() == "Darwin" and shutil.which("security"):
+        return "keychain"
+    if shutil.which("secret-tool"):
+        return "secret-service"
+    return "file"
+
+
 
 def _keychain_password(output: str) -> str:
     """Parse the ``password:`` line of ``security find-generic-password -g``.
@@ -154,11 +163,7 @@ class SecretStore:
         if requested != "auto":
             self._require_available(requested)
             return requested
-        if platform.system() == "Darwin" and shutil.which("security"):
-            return "keychain"
-        if shutil.which("secret-tool"):
-            return "secret-service"
-        return "file"
+        return auto_backend()
 
     def _require_available(self, backend: str) -> None:
         if backend == "keychain" and not shutil.which("security"):

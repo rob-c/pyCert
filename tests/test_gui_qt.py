@@ -1307,3 +1307,24 @@ def test_colour_scheme_signal_reaches_live_windows_only(qtbot, config, window, m
     assert not shiboken6.isValid(doomed)
     QGuiApplication.styleHints().colorSchemeChanged.emit(Qt.ColorScheme.Dark)
     assert window in calls and all(shiboken6.isValid(w) for w in calls)
+
+
+def test_gui_check_mode(qtbot, config, capsys, monkeypatch, tmp_path):
+    """`pycertwiz gui --check` proves Qt and the main window load (used by package tests)."""
+    from pycert import cli
+    from pycert.gui import main as gui_main
+
+    assert cli.main(["--config", str(config.path), "gui", "--check"]) == 0
+    assert "GUI check OK: offscreen platform" in capsys.readouterr().out
+    assert gui_main(["--config", str(config.path), "--check"]) == 0
+    assert "GUI check OK" in capsys.readouterr().out
+    # a configuration that cannot be loaded, and a window that does not render
+    assert gui_main(["--config", str(tmp_path / "missing.toml"), "--check"]) == 1
+    assert "GUI check failed" in capsys.readouterr().err
+    from PySide6.QtGui import QPixmap
+
+    from pycert.gui.app import MainWindow
+
+    monkeypatch.setattr(MainWindow, "grab", lambda self: QPixmap())
+    assert gui_main(["--config", str(config.path), "--check"]) == 1
+    assert "did not render" in capsys.readouterr().err

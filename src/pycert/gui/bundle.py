@@ -126,7 +126,7 @@ class BundleInspector(QDialog):
             lambda: self.import_all_requested.emit(str(Path(self.path.text().strip()).expanduser()), self._loaded_password)
         )
         self.link_button = button("Use as certificate store…", "package", primary=True)
-        self.link_button.setToolTip("Keep this keystore in step with pyCert: import its entries and write renewals back")
+        self.link_button.setToolTip("Keep this keystore in step with pyCertWiz: import its entries and write renewals back")
         self.link_button.clicked.connect(
             lambda: self.link_requested.emit(str(Path(self.path.text().strip()).expanduser()), self._loaded_password)
         )

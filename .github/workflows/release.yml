@@ -1,0 +1,99 @@
+name: Release
+
+# Push a tag like v2.0.1 (matching the version in pyproject.toml) to build and
+# test every package (packages.yml), then:
+#   * create a GitHub Release with all packages, SHA256SUMS and build provenance;
+#   * publish the wheel and sdist to PyPI (trusted publishing: no token).
+#
+# One-time setup on pypi.org: add a trusted publisher for project "pyCertWiz",
+# owner rob-c, repository pyCertWiz, workflow release.yml, environment pypi.
+# The macOS .dmg files are signed ad hoc; sign and notarize them locally with
+# packaging/macos/sign-and-notarize.sh and upload the -signed.dmg files to the
+# release (gh release upload vX.Y.Z dist/*-signed.dmg).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Tag matches the version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
+            exit 1
+          fi
+
+  packages:
+    needs: version
+    uses: ./.github/workflows/packages.yml
+
+  github-release:
+    name: GitHub Release
+    needs: packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          mkdir release
+          find artifacts -type f -exec cp {} release/ \;
+          (cd release && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/*
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          awk -v v="## $version" '$0 == v {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
+          cat >> notes.md <<'NOTES'
+
+          ### Downloads
+
+          | System | File |
+          |---|---|
+          | Linux, any distribution (x86_64, aarch64) | `pyCertWiz-*.AppImage` |
+          | Debian, Ubuntu | `pycertwiz_*.deb` |
+          | Fedora, RHEL/AlmaLinux/Rocky, openSUSE | `pycertwiz-*.rpm` |
+          | Arch Linux | `pycertwiz-*.pkg.tar.zst` |
+          | macOS (Apple silicon, Intel) | `pyCertWiz-*-macos-*.dmg` |
+          | Python 3.10+ (`pip install pyCertWiz`) | `pycertwiz-*.whl`, `pycertwiz-*.tar.gz` |
+
+          Verify a download with `sha256sum -c SHA256SUMS --ignore-missing` or
+          `gh attestation verify FILE --repo rob-c/pyCertWiz`.
+          NOTES
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "pyCertWiz ${GITHUB_REF_NAME#v}" --notes-file notes.md release/*
+
+  pypi:
+    name: Publish to PyPI
+    needs: packages
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pyCertWiz/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

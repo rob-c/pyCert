@@ -35,6 +35,10 @@ def test_gui_available_explains_a_missing_pyside(monkeypatch):
     monkeypatch.setitem(sys.modules, "PySide6", None)  # what an install without the extra looks like
     problem = gui.gui_available()
     assert "needs PySide6" in problem and "pip install" in problem
+    # a packaged pyCertWiz bundles Qt: what is missing are system libraries
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    problem = gui.gui_available()
+    assert "cannot load Qt" in problem and "libegl1" in problem and "pip install" not in problem
 
 
 def test_gui_available_needs_a_display_on_linux(monkeypatch):

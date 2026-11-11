@@ -1,0 +1,111 @@
+# Annotated example configuration for pyCertWiz.
+#
+# Copy this to ~/.config/pycert/pycert.toml, or run:
+#     pycert init ~/.config/pycert --email you@example.org
+# which copies the pinned UK e-Science CA chain as well.
+#
+# Everything here is documented in docs/CONFIGURATION.md.
+
+version = 2
+profile = "production"
+# The CA used for new requests when --ca is not given ('pycert ca list').
+default_ca = "uk-escience"
+
+[ca]
+# The primary CA. Requests made before pyCertWiz 2.0 belong to it.
+name = "uk-escience"
+display_name = "UK e-Science CA"
+base_url = "https://cwiz-live.ca.ngs.ac.uk:443"
+version_string = "CertWizard 2.2.1"   # the server checks this
+user_agent = "pyCertWiz/2.0"
+timeout = 30.0            # socket read timeout
+connect_timeout = 10.0
+deadline = 90.0           # total time per request attempt
+dns_timeout = 10.0
+retries = 2               # idempotent requests only
+max_redirects = 2         # same-host, GET/HEAD only
+max_body_bytes = 8388608
+max_header_bytes = 131072
+backoff_base = 0.4
+backoff_cap = 8.0
+tls_verify = true                     # never disable in production
+tls_trust = "chain"                   # use the [[chain.certificates]] anchors
+tls_pin_sha256 = []                   # optional leaf pin, e.g. "6A:F3:84:…"
+allow_plaintext = false
+allow_sha1 = false
+
+[identity]
+c = "UK"
+o = "eScience"
+ou = "CLRC"
+l = "DL"
+email = "grid-ops@example.org"
+ra = "CLRC DL"                        # see `pycert ras`
+
+[keys]
+algorithm = "rsa"
+rsa_bits = 3072
+ec_curve = "P-256"
+
+[csr]
+hash = "sha256"
+extensions = ["san"]
+pin_hash = "sha1"                     # required by the current CA
+
+[p12]
+filename_template = "{cn}.p12"
+friendly_name = "{cn}"
+export_dir = ""                       # the request directory
+include_chain = true
+
+[paths]
+data_dir = "~/.local/share/pycert"
+
+[secrets]
+# macOS: keychain. Linux desktop: secret-service. Any OS with the 'keyring'
+# package: keyring. 1Password/pass: command. CI: env.
+# Last resort: file (plaintext at rest, mode 0600).
+backend = "keychain"
+service = "pyCert"
+account = "default"
+key_account = ""                      # reuse the same saved secret
+command = ""
+command_timeout = 15.0
+env_var = "PYCERT_P12_PASSPHRASE"
+
+[[chain.certificates]]
+label = "UK e-Science Root (2007)"
+file = "chain/escience-root.pem"
+sha256 = "76f3a5942e22012d7e10e11b416fb2eea21d8f4583f2d2fc799bd4ced0210323"
+
+[[chain.certificates]]
+label = "UK e-Science CA 2B"
+file = "chain/escience-2b.pem"
+sha256 = "b6d140a765d165d8917bb9941f7ab21ff89c04155a4dce52cad345862c3e686e"
+
+[[chain.certificates]]
+label = "UK e-Science Root 2026"
+file = "chain/escience-root-2026.pem"
+sha256 = "565c16e7d6ff0f602aefca2a585634c190d7d9da411c7750d79cac6b351ffffa"
+
+[[chain.certificates]]
+label = "UK e-Science CA 3B"
+file = "chain/escience-3b.pem"
+sha256 = "16383860bc6e61488ffb945e961963967c4fe8d73d2b2e9641d0b535cca4b845"
+
+# ---------------------------------------------------------------------------
+# Additional CA profiles.  Host certificates for public web services can come
+# from an ACME CA alongside the UK e-Science grid certificates.  See
+# docs/ACME_CLIENT.md.  Use with: pycert request www.example.ac.uk --type host --ca letsencrypt-staging
+# ---------------------------------------------------------------------------
+
+[cas.letsencrypt-staging]
+kind = "acme"
+display_name = "Let's Encrypt (staging)"
+directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+contact = ["grid-ops@example.org"]
+# Read https://letsencrypt.org/repository/ and then set this to true.
+terms_agreed = false
+challenge = "http-01"
+http_mode = "webroot"          # or "standalone" (pyCertWiz listens on http_port)
+webroot = "/var/www/html"

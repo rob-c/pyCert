@@ -15,7 +15,7 @@ Built-in kinds:
     validation, for host certificates from ACME CAs.
 
 Third-party providers are discovered through the ``pycert.providers`` entry
-point group, so another CA protocol can be added without changing pyCert::
+point group, so another CA protocol can be added without changing pyCertWiz::
 
     [project.entry-points."pycert.providers"]
     myca = "mypackage.myca:MyCAProvider"

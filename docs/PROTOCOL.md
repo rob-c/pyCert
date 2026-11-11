@@ -219,7 +219,7 @@ pyCertWiz also accepts a bare PEM/DER body. Certificate IDs must match
 ```
 
 PPPK-authenticated with the key of the certificate being revoked (the server
-challenges with that certificate’s key). Reasons offered by pyCert:
+challenges with that certificate’s key). Reasons offered by pyCertWiz:
 `unspecified`, `keyCompromise`, `cACompromise`, `affiliationChanged`,
 `superseded`, `cessationOfOperation`, `certificateHold`.
 
