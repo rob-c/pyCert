@@ -1,24 +1,28 @@
 PYTHON ?= python3
 VENV ?= .venv
 BIN := $(VENV)/bin
+JOBS ?= auto
 
-.PHONY: help venv install dev test coverage lint format check check-py36 selftest build clean
+.PHONY: help venv install dev test test-serial coverage lint format check selftest gui screenshots build clean
 
 help:
-	@echo "make venv      create the virtualenv and install pyCert (editable)"
-	@echo "make dev       venv + test tooling"
-	@echo "make test      run the test suite"
-	@echo "make coverage  run the suite with the 100% non-GUI coverage gate"
-	@echo "make lint      ruff check"
-	@echo "make check-py36 Python 3.6 grammar/runtime checks (vermin + custom)"
-	@echo "make format    ruff format + check"
-	@echo "make build     build a wheel and sdist in dist/"
-	@echo "make clean     remove caches and build artefacts"
+	@echo "make venv         create the virtualenv and install pyCertWiz (editable, with the GUI)"
+	@echo "make dev          venv + test tooling (pytest, pytest-qt, pytest-xdist, ruff, build)"
+	@echo "make test         run the test suite in parallel (JOBS=auto)"
+	@echo "make test-serial  run the test suite in one process"
+	@echo "make coverage     full suite with the 100% line and branch coverage gate (GUI included)"
+	@echo "make lint         ruff check"
+	@echo "make format       ruff format + autofix"
+	@echo "make check        lint + test"
+	@echo "make gui          start the desktop application"
+	@echo "make screenshots  regenerate docs/images against a throw-away sandbox CA"
+	@echo "make build        build a wheel and sdist in dist/"
+	@echo "make clean        remove caches and build artefacts"
 
 venv:
 	$(PYTHON) -m venv $(VENV)
 	$(BIN)/pip install --upgrade pip
-	$(BIN)/pip install -e .
+	$(BIN)/pip install -e ".[gui]"
 
 dev: venv
 	$(BIN)/pip install -e ".[dev]"
@@ -26,17 +30,16 @@ dev: venv
 install: venv
 
 test:
-	$(BIN)/pytest
+	QT_QPA_PLATFORM=offscreen $(BIN)/pytest -n $(JOBS)
+
+test-serial:
+	QT_QPA_PLATFORM=offscreen $(BIN)/pytest
 
 coverage:
-	$(BIN)/pytest --cov=src/pycert --cov-report=term-missing --cov-fail-under=100
+	QT_QPA_PLATFORM=offscreen $(BIN)/pytest -n $(JOBS) --cov=src/pycert --cov-report=term-missing --cov-fail-under=100
 
 lint:
 	$(BIN)/ruff check src tests sandbox_ca
-
-check-py36:
-	$(BIN)/python tools/check_py36.py .
-	$(BIN)/vermin -t=3.6- --no-tips --violations src/pycert sandbox_ca
 
 selftest:
 	$(BIN)/pycert selftest
@@ -45,12 +48,17 @@ format:
 	$(BIN)/ruff format src tests sandbox_ca
 	$(BIN)/ruff check --fix src tests sandbox_ca
 
-check: lint check-py36 test
+check: lint test
+
+gui:
+	$(BIN)/pycert gui
+
+screenshots:
+	QT_QPA_PLATFORM=offscreen $(BIN)/python tools/screenshots.py docs/images
 
 build: dev
-	$(BIN)/pip install build
 	$(BIN)/python -m build
 
 clean:
-	rm -rf $(VENV) dist build *.egg-info src/*.egg-info .pytest_cache .ruff_cache
+	rm -rf $(VENV) dist build *.egg-info src/*.egg-info .pytest_cache .ruff_cache .coverage htmlcov
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

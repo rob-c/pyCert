@@ -82,7 +82,7 @@ def _patch_properties(text: str, info: dict) -> str:
     seen_o = False
     seen_c = False
     seen_base = False
-    lines = ["# Patched by pyCert sandbox_ca: certificates are issued by a test CA.", "#"]
+    lines = ["# Patched by pyCertWiz sandbox_ca: certificates are issued by a test CA.", "#"]
     for raw in text.splitlines():
         stripped = raw.strip()
         if not stripped or stripped.startswith("#") or "=" not in raw:
@@ -321,7 +321,7 @@ def build_source_kit(source_dir: "str | Path", out_dir: "str | Path", info: "dic
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Patch CertWizard to trust/use a running pyCert sandbox CA.",
+        description="Patch CertWizard to trust/use a running pyCertWiz sandbox CA.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--data-dir", default=".sandbox-ca", help="directory containing sandbox.json")

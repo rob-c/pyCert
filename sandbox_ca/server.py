@@ -1,6 +1,6 @@
 """Standalone sandbox CA for exercising the Java CertWizard client.
 
-The protocol implementation is shared with the pyCert test suite
+The protocol implementation is shared with the pyCertWiz test suite
 (``sandbox_ca.mock_ca``); this module adds a small authenticated admin API and
 persists the CA hierarchy in a data directory so a patched Java client keeps
 trusting the same CA across restarts.
@@ -41,7 +41,7 @@ class SandboxCA(MockCA):
         auto_approve: bool = True,
         sign_after_polls: int = 1,
         admin_token: "str | None" = None,
-        motd: str = "pyCert sandbox CA: certificates issued here are for testing only.",
+        motd: str = "pyCertWiz sandbox CA: certificates issued here are for testing only.",
     ):
         self.data_dir_path = Path(data_dir).expanduser().resolve()
         self.admin_token = admin_token

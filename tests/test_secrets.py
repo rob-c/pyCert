@@ -68,7 +68,7 @@ def test_generate_secret_shape():
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS keychain")
 def test_keychain_backend(tmp_path):
-    config = SecretConfig(backend="keychain", service="pyCert-pytest", account="probe")
+    config = SecretConfig(backend="keychain", service="pyCertWiz-pytest", account="probe")
     store = SecretStore(config, tmp_path, "pytest")
     if not store.exists():
         store.set(generate_secret())
@@ -82,10 +82,61 @@ def test_auto_backend_resolves(tmp_path):
     assert store.backend in ("keychain", "secret-service", "file")
 
 
-def test_keychain_rejects_unsafe_characters(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "value", ['has "quotes" and \\ backslash', "pa*ss wörd €", "tab\there", "0xdeadbeef", "deadbeef", " lead"]
+)
+def test_keychain_stores_any_characters_as_hex_on_stdin(tmp_path, monkeypatch, value):
+    from types import SimpleNamespace
+
     import pycert.secrets_store as module
 
     monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/" + name)
     store = SecretStore(SecretConfig(backend="keychain"), tmp_path, "test")
+    calls = []
+
+    def fake(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(store, "_subprocess", fake)
+    store.set(value, "acct")
+    args, kwargs = calls[0]
+    assert args == ["security", "-i"]  # the secret is never in argv
+    assert f"-X {value.encode('utf-8').hex()}" in kwargs["input"]
+    assert value not in kwargs["input"]
+
+
+@pytest.mark.parametrize(
+    "output, expected",
+    [
+        ('keychain: "x"\npassword: "pa*ss"\n', "pa*ss"),
+        ('password: "deadbeef"\n', "deadbeef"),
+        ('password: "0xabc"\n', "0xabc"),
+        ('password: "x""\n', 'x"'),
+        ('password: 0x77C3B67264E282AC  "w\\303\\266rd\\342\\202\\254"\n', "wörd€"),
+        ("password: \n", ""),
+    ],
+)
+def test_keychain_password_output_is_parsed_unambiguously(output, expected):
+    from pycert.secrets_store import _keychain_password
+
+    assert _keychain_password(output) == expected
+
+
+@pytest.mark.parametrize("output", ["nothing useful", "password: garbage", 'password: 0xZZ  "?"'])
+def test_keychain_password_output_errors(output):
+    from pycert.secrets_store import _keychain_password
+
     with pytest.raises(SecretError):
-        store.set('has "quotes" and \\ backslash')
+        _keychain_password(output)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS keychain")
+def test_keychain_round_trips_awkward_passphrases(tmp_path):
+    store = SecretStore(SecretConfig(backend="keychain", service="pyCertWiz-pytest-chars"), tmp_path, "test")
+    try:
+        for value in ('pa*ss wörd "q" \\ €', "tab\there", "deadbeef", "0xabc", "trailing "):
+            store.set(value, "probe")
+            assert store.get("probe") == value
+    finally:
+        store.delete("probe")

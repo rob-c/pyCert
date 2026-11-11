@@ -67,7 +67,7 @@ def test_host_lifecycle(e2e):
     host = e2e.request_host(auth=user, wait=True)
     assert host.code == 0, host.err
     host_alias = host.json["alias"]
-    exported = e2e.run("export", host_alias)
+    exported = e2e.run("export", host_alias, "--stored")
     assert exported.code == 0
     revoked = e2e.run("revoke", host_alias, "--yes")
     assert revoked.code == 0
@@ -109,7 +109,8 @@ def test_import_export_verify_lifecycle(e2e, tmp_path):
     )
     assert imported.code == 0, imported.err
     target = tmp_path / "roundtrip.p12"
-    exported = e2e.run_json("export", "lifecycle imported", "--out", str(target))
+    (tmp_path / "pw").write_text("round trip passphrase\n")
+    exported = e2e.run_json("export", "lifecycle imported", "--out", str(target), "--password-file", str(tmp_path / "pw"))
     assert exported.code == 0
     verified = e2e.run_json("verify", "lifecycle imported", "--no-p12")
     assert verified.code in (0, 4)
@@ -121,7 +122,7 @@ LIFECYCLE_ACTIONS = [
     ["show", "{alias}"],
     ["list"],
     ["verify", "{alias}"],
-    ["export", "{alias}"],
+    ["export", "{alias}", "--stored"],
     ["download", "{alias}"],
     ["watch", "--once"],
     ["renew", "--due", "30", "--dry-run"],

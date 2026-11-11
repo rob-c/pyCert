@@ -133,11 +133,7 @@ def test_chain_fetcher_cache_and_system_anchors(monkeypatch):
 def test_certs_empty_bundle_and_small_keys(monkeypatch):
     from types import SimpleNamespace
 
-    monkeypatch.setattr(
-        certs,
-        "load_pem_certificates",
-        lambda _data: [],
-    )
+    monkeypatch.setattr(certs.x509, "load_pem_x509_certificates", lambda _data: [])
     with pytest.raises(CryptoError):
         certs.load_certificates(b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----")
     from cryptography.hazmat.primitives.asymmetric import ed448

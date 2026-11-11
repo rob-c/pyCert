@@ -32,8 +32,9 @@ except ImportError:  # pragma: no cover - older cryptography
 
         RC2 = None
 
+from dataclasses import dataclass, field
+
 from . import ber, certs, p12
-from .compat import dataclass, field
 from .errors import CryptoError, PyCertError
 from .pkcs12_writer import _bmp_password, pkcs12_kdf
 
@@ -79,6 +80,8 @@ class CertificateBundle:
     key_aliases: "list[str]" = field(default_factory=list)
     raw_key_bags: "list[bytes]" = field(default_factory=list, repr=False)
     raw_cert_bags: "list[bytes]" = field(default_factory=list, repr=False)
+    #: "pbes2" when the certificate SafeContents used modern PBES2 encryption
+    encryption: str = ""
 
     def __len__(self):
         return len(self.certificates)
@@ -110,8 +113,13 @@ def load_bundle(path: "str | Path", password: str = "") -> CertificateBundle:
     return load_bundle_bytes(data, password=password, path=str(path))
 
 
-def load_bundle_bytes(data: bytes, password: str = "", path: str = "") -> CertificateBundle:
-    """Decode bundle content already held in memory."""
+def load_bundle_bytes(data: bytes, password: str = "", path: str = "", *, prefer_raw: bool = False) -> CertificateBundle:
+    """Decode bundle content already held in memory.
+
+    ``prefer_raw`` keeps every PKCS#12 SafeBag (needed to edit a keystore
+    entry by entry) even for single-key PBES2 files, which are otherwise fully
+    decoded so their key can be described and re-encrypted.
+    """
     if isinstance(data, str):  # pragma: no cover - defensive for callers
         data = data.encode("utf-8")
     if not data:
@@ -128,7 +136,7 @@ def load_bundle_bytes(data: bytes, password: str = "", path: str = "") -> Certif
             return _load_jks(data, password, path, magic)
 
     try:
-        return _load_pkcs12(data, password, path)
+        return _load_pkcs12(data, password, path, prefer_raw=prefer_raw)
     except CryptoError as p12_error:
         # DER certificates and PKCS#7 bundles are not PKCS#12.  Try those
         # before reporting the PKCS#12 error, which may simply be a wrong
@@ -151,12 +159,13 @@ def _load_pem(data: bytes, path: str) -> CertificateBundle:
     )
 
 
-def _load_pkcs12(data: bytes, password: str, path: str) -> CertificateBundle:
-    # The raw path understands Java's BER and legacy RC2/3DES SafeContents,
-    # and preserves all key bags for a lossless re-export.  Fall back to the
-    # high-level cryptography parser for layouts it does not understand.
+def _load_pkcs12(data: bytes, password: str, path: str, *, prefer_raw: bool = False) -> CertificateBundle:
+    # The raw path understands Java's BER, legacy RC2/3DES and PBES2
+    # SafeContents, and preserves all key bags for a lossless re-export.  A
+    # single-key PBES2 file (pyCertWiz's own, OpenSSL 3, modern keytool) is fully
+    # decoded instead, so its key can be described and re-encrypted for old Java.
     raw = _load_pkcs12_raw(data, password, path)
-    if raw is not None:
+    if raw is not None and (prefer_raw or raw.encryption != "pbes2" or raw.key_count > 1):
         return raw
     try:
         key, certificate, extras = pkcs12.load_key_and_certificates(
@@ -199,7 +208,9 @@ def _load_pkcs12(data: bytes, password: str, path: str) -> CertificateBundle:
         has_private_key=key is not None,
         key_description=certs.key_description(key.public_key()) if key is not None else "",
         warnings=warnings,
+        integrity_checked=raw is not None and raw.integrity_checked,
         private_key=key,
+        key_count=1 if key is not None else 0,
     )
 
 
@@ -273,8 +284,7 @@ def _load_pkcs12_raw(data: bytes, password: str, path: str) -> "CertificateBundl
         if auth_info.tag != 0x10 or len(auth_info.children) < 2:
             return None
         authenticated_bytes = ber.octets(auth_info.children[1])
-        if password:
-            _verify_pfx_mac(pfx, authenticated_bytes, password)
+        integrity_checked = bool(password) and _verify_pfx_mac(pfx, authenticated_bytes, password)
         authenticated = ber.parse(authenticated_bytes)
         entries: "list[BundleCertificate]" = []
         seen: "set[str]" = set()
@@ -282,6 +292,7 @@ def _load_pkcs12_raw(data: bytes, password: str, path: str) -> "CertificateBundl
         raw_key_bags: "list[bytes]" = []
         key_aliases: "list[str]" = []
         encrypted_certificates = False
+        encryption = ""
         for content_info in authenticated.children:
             oid = ber.decode_oid(content_info.children[0].content)
             content = content_info.children[1]
@@ -293,6 +304,8 @@ def _load_pkcs12_raw(data: bytes, password: str, path: str) -> "CertificateBundl
                     encrypted_certificates = True
                     continue
                 plaintext = _decrypt_encrypted_data(content, password)
+                if _uses_pbes2(content):
+                    encryption = "pbes2"
                 safe = ber.parse(plaintext)
                 _collect_safe(safe, entries, seen, raw_cert_bags, raw_key_bags, key_aliases)
     except _UnsupportedPBE:
@@ -330,22 +343,25 @@ def _load_pkcs12_raw(data: bytes, password: str, path: str) -> "CertificateBundl
             else ("Java key entry (preserved)" if raw_key_bags else "")
         ),
         warnings=warnings,
+        integrity_checked=integrity_checked,
         key_count=len(raw_key_bags),
         key_aliases=key_aliases,
         raw_key_bags=raw_key_bags,
         raw_cert_bags=raw_cert_bags,
+        encryption=encryption,
     )
 
 
-def _verify_pfx_mac(pfx, authenticated_bytes: bytes, password: str) -> None:
+def _verify_pfx_mac(pfx, authenticated_bytes: bytes, password: str) -> bool:
+    """Check the PKCS#12 MAC; True when one was present and matched (raises if it did not)."""
     if len(pfx.children) < 3:  # pragma: no cover - MAC is optional
-        return
+        return False
     mac_data = pfx.children[2]
     if mac_data.tag != 0x10 or len(mac_data.children) < 2:  # pragma: no cover - malformed MAC
-        return
+        return False
     digest_info = mac_data.children[0]
     if digest_info.tag != 0x10 or len(digest_info.children) < 2:  # pragma: no cover - malformed MAC
-        return
+        return False
     algorithm = digest_info.children[0]
     digest = digest_info.children[1].content
     oid = ber.decode_oid(algorithm.children[0].content)
@@ -370,6 +386,7 @@ def _verify_pfx_mac(pfx, authenticated_bytes: bytes, password: str) -> None:
     expected = hmac.new(mac_key, authenticated_bytes, hash_function).digest()
     if not hmac.compare_digest(expected, digest):
         raise CryptoError("PKCS#12 integrity check failed (wrong passphrase or corrupt file)")
+    return True
 
 
 def _collect_safe(
@@ -426,6 +443,11 @@ def _decrypt_encrypted_data(content, password: str) -> bytes:
     encrypted = encrypted_content_info.children[2]
     oid = ber.decode_oid(algorithm.children[0].content)
     params = algorithm.children[1]
+    if oid == _PBES2_OID:
+        # Modern keytool (Java 8u301+) and OpenSSL 3 encrypt the certificate
+        # SafeContents with PBES2/PBKDF2/AES; decoding it here keeps every key
+        # entry of such keystores (the high-level parser keeps only the first).
+        return _pbes2_decrypt(params, ber.octets(encrypted_content_info.children[2]), password)
     salt = params.children[0].content
     iterations = int.from_bytes(params.children[1].content, "big")
     key_length = {
@@ -455,6 +477,66 @@ def _decrypt_encrypted_data(content, password: str) -> bytes:
         padded = _openssl_rc2_40_decrypt(ciphertext, key, iv)
     unpadder = padding.PKCS7(64).unpadder()
     return unpadder.update(padded) + unpadder.finalize()
+
+
+_PBES2_OID = "1.2.840.113549.1.5.13"
+
+
+def _uses_pbes2(content) -> bool:
+    encrypted_data = content.children[0] if content.children else content
+    sequence = encrypted_data if encrypted_data.tag == 0x10 else encrypted_data.children[0]
+    algorithm = sequence.children[1].children[1]
+    return ber.decode_oid(algorithm.children[0].content) == _PBES2_OID
+_PBKDF2_OID = "1.2.840.113549.1.5.12"
+_PBKDF2_PRFS = {
+    "1.2.840.113549.2.7": "SHA1",
+    "1.2.840.113549.2.8": "SHA224",
+    "1.2.840.113549.2.9": "SHA256",
+    "1.2.840.113549.2.10": "SHA384",
+    "1.2.840.113549.2.11": "SHA512",
+}
+_PBES2_CIPHERS = {
+    "2.16.840.1.101.3.4.1.2": 16,  # aes128-CBC
+    "2.16.840.1.101.3.4.1.22": 24,  # aes192-CBC
+    "2.16.840.1.101.3.4.1.42": 32,  # aes256-CBC
+}
+
+
+def _pbes2_decrypt(params, ciphertext: bytes, password: str) -> bytes:
+    """PBES2 (RFC 8018) with PBKDF2-HMAC and AES-CBC; the password is UTF-8."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers import algorithms
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    kdf, scheme = params.children[0], params.children[1]
+    if ber.decode_oid(kdf.children[0].content) != _PBKDF2_OID:
+        raise _UnsupportedPBE("unsupported PBES2 key derivation function")
+    kdf_params = kdf.children[1]
+    salt = kdf_params.children[0].content
+    iterations = int.from_bytes(kdf_params.children[1].content, "big")
+    prf = "SHA1"
+    for child in kdf_params.children[2:]:
+        if child.tag == 0x10:  # prf AlgorithmIdentifier (keyLength INTEGER is skipped)
+            prf = _PBKDF2_PRFS.get(ber.decode_oid(child.children[0].content), "")
+            if not prf:
+                raise _UnsupportedPBE("unsupported PBKDF2 pseudo-random function")
+    cipher_oid = ber.decode_oid(scheme.children[0].content)
+    key_length = _PBES2_CIPHERS.get(cipher_oid)
+    if key_length is None:
+        raise _UnsupportedPBE("unsupported PBES2 cipher %s" % cipher_oid)
+    iv = scheme.children[1].content
+    if iterations < 1 or iterations > 10_000_000:
+        raise CryptoError("implausible PBKDF2 iteration count in the bundle")
+    key = PBKDF2HMAC(
+        algorithm=getattr(hashes, prf)(), length=key_length, salt=salt, iterations=iterations
+    ).derive(password.encode("utf-8"))
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    try:
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+        unpadder = padding.PKCS7(128).unpadder()
+        return unpadder.update(padded) + unpadder.finalize()
+    except ValueError as exc:
+        raise CryptoError("could not decrypt the PKCS#12 certificates (wrong passphrase?)") from exc
 
 
 def _openssl_rc2_40_decrypt(ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
@@ -523,7 +605,7 @@ def write_java_bundle(
         return str(path)
     if bundle.has_private_key and bundle.private_key is None:
         raise CryptoError(
-            "the bundle contains a private key that pyCert cannot decode; "
+            "the bundle contains a private key that pyCertWiz cannot decode; "
             "use Save all PEM or let the Java tool convert it"
         )
     leaf = next((entry for entry in bundle.certificates if entry.role == "leaf"), None)

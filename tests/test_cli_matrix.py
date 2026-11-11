@@ -379,9 +379,10 @@ def test_verify_failure_exit_4(config, issued, capsys):
 def test_export_with_out(config, issued, capsys, tmp_path):
     state = issued()
     target = tmp_path / "cli-export.p12"
-    code, out, err = run(cli(config, "export", state.alias, "--out", str(target)), capsys)
+    (tmp_path / "pw").write_text("export passphrase\n")
+    code, out, err = run(cli(config, "export", state.alias, "--out", str(target), "--password-file", str(tmp_path / "pw")), capsys)
     assert code == 0, err
-    assert out.strip() == str(target)
+    assert out.strip() == f"p12: {target}"
     assert target.is_file()
 
 
@@ -410,7 +411,11 @@ def test_export_password_argument_warns(config, issued, capsys, tmp_path):
 
 def test_install_json(config, issued, capsys, tmp_path):
     state = issued()
-    code, out, err = run(cli(config, "install", state.alias, "--dir", str(tmp_path / "g"), "--json"), capsys)
+    (tmp_path / "pw").write_text("install passphrase\n")
+    code, out, err = run(
+        cli(config, "install", state.alias, "--dir", str(tmp_path / "g"), "--json", "--password-file", str(tmp_path / "pw")),
+        capsys,
+    )
     assert code == 0
     payload = json.loads(out)
     assert Path(payload["cert"]).is_file()

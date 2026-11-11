@@ -1,6 +1,6 @@
 # Proxy certificates and proxy bundles
 
-pyCert can delegate a stored UK e-Science certificate to a short-lived
+pyCertWiz can delegate a stored UK e-Science certificate to a short-lived
 **RFC 3820 proxy certificate**.  The proxy is signed by the stored end-entity
 certificate and private key, verified immediately, and written as a PEM bundle
 that contains the proxy key, proxy certificate and issuer chain.
@@ -9,9 +9,10 @@ This is the traditional GSI/Grid delegation model.  It is deliberately separate
 from the ACME listener: an ACME server issues certificates; a proxy is a local
 delegation signed by a certificate you already hold.
 
-> Proxy bundles contain an unencrypted private key by default (mode 0600) so
-> that Grid tools can read them.  Use a password for an encrypted key, or remove
-> the bundle immediately after the short-lived job.
+> pyCertWiz never writes an unprotected private key, so the proxy key is
+> encrypted: with the passphrase you give (`--password-file`/`--password-stdin`),
+> or pyCertWiz's saved secret. Tools that need an unencrypted proxy cannot use it
+> directly. Remove the bundle when the job finishes.
 
 ## Create a proxy
 
@@ -48,7 +49,7 @@ $ pycert proxy jane-doe \
 
 The PEM bundle is, in order:
 
-1. proxy private key (PKCS#8, unencrypted unless a password was supplied);
+1. proxy private key (encrypted PKCS#8: your passphrase, or the saved secret);
 2. proxy certificate;
 3. issuer/end-entity certificate;
 4. issuer chain (roots/intermediates as available), deduplicated.

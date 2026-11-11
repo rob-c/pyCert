@@ -10,6 +10,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
+from openssl_support import legacy_pkcs12_args
 
 from pycert import certs
 from pycert import p12 as p12_module
@@ -228,7 +229,7 @@ def test_legacy_pkcs12_import(tmp_path):
             OPENSSL,
             "pkcs12",
             "-export",
-            "-legacy",
+            *legacy_pkcs12_args(),
             "-in",
             str(cert_path),
             "-inkey",

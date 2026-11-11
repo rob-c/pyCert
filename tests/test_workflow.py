@@ -139,7 +139,7 @@ def test_unverified_chain_stores_certificate_but_refuses_pkcs12(ctx, config, ca,
     monkeypatch.setattr(
         ctx,
         "build_chain",
-        lambda certificate: chain_module.ChainResult(
+        lambda certificate, *_args, **_kwargs: chain_module.ChainResult(
             [certificate], complete=False, trusted=False, problems=["test: no anchor"]
         ),
     )
@@ -188,7 +188,7 @@ def test_renewal_failure_keeps_current_certificate(ctx, config, ca, issued):
     state = issued()
     old_cert_bytes = ctx.store.cert_path(state).read_bytes()
     old_key_bytes = ctx.store.file(state, "key.pem").read_bytes()
-    ca.reject_next = [(202, ca._error_xml("no renewal for you"))]
+    ca.fail_next("/CSR", status=202, body=ca._error_xml("no renewal for you"))
     with pytest.raises(CAError):
         renew(ctx, state.alias, progress=lambda _m: None)
     state = ctx.store.get(state.alias)
@@ -286,16 +286,25 @@ def test_export_accepts_custom_password_and_path(ctx, issued, tmp_path):
 def test_install_pem_modes(ctx, issued, tmp_path):
     state = issued()
     target = tmp_path / "globus"
-    paths = install_pem(ctx, state.alias, target, progress=lambda _m: None)
+    # userkey.pem needs a new passphrase: never the saved secret, never empty by default
+    with pytest.raises(PyCertError, match="needs a new passphrase"):
+        install_pem(ctx, state.alias, target, progress=lambda _m: None)
+    with pytest.raises(PyCertError, match="not pyCertWiz's own saved secret"):
+        install_pem(ctx, state.alias, target, password=ctx.p12_passphrase(), progress=lambda _m: None)
+    paths = install_pem(ctx, state.alias, target, password="grid-proxy-pass", progress=lambda _m: None)
     assert stat.S_IMODE(paths["cert"].stat().st_mode) == 0o644
     assert stat.S_IMODE(paths["key"].stat().st_mode) == 0o400
-    key = certs.load_private_key(paths["key"].read_bytes())
-    assert certs.key_description(key.public_key()) == state.key_algorithm
-    # encrypted variant
-    paths = install_pem(ctx, state.alias, target, encrypt_key=True, progress=lambda _m: None)
     with pytest.raises(CryptoError):
         certs.load_private_key(paths["key"].read_bytes())
-    assert certs.load_private_key(paths["key"].read_bytes(), ctx.p12_passphrase())
+    key = certs.load_private_key(paths["key"].read_bytes(), "grid-proxy-pass")
+    assert certs.key_description(key.public_key()) == state.key_algorithm
+
+
+def test_private_keys_are_never_serialised_without_a_passphrase(ctx, issued):
+    key = ctx.store.load_key(issued("no plain keys"), ctx.key_passphrase())
+    for empty in (None, "", b""):
+        with pytest.raises(CryptoError, match="without passphrase"):
+            certs.key_pem(key, empty)
 
 
 def test_refresh_all(ctx, config, ca):

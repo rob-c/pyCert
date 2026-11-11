@@ -1,6 +1,6 @@
 """Storage and retrieval of the saved PKCS#12/key passphrase.
 
-pyCert must be able to produce a ``.p12`` unattended, so the passphrase has to
+pyCertWiz must be able to produce a ``.p12`` unattended, so the passphrase has to
 be stored somewhere.  Five backends are supported, in decreasing order of
 preference:
 
@@ -9,15 +9,20 @@ preference:
     stdin, so it never appears in the process list.
 ``secret-service``
     Freedesktop Secret Service (GNOME Keyring, KWallet) via ``secret-tool``.
+``keyring``
+    The cross-platform :mod:`keyring` library (``pip install 'pyCertWiz[keyring]'``):
+    macOS Keychain, Freedesktop Secret Service, KWallet or the Windows
+    Credential Locker, whichever keyring the platform provides.  It is never
+    chosen by ``auto``, so an existing installation keeps finding its secret.
 ``command``
     Any external password manager (``op read``, ``pass show``, ``gopass``, ...).
-    pyCert runs the command and reads the secret from stdout (or writes it to
+    pyCertWiz runs the command and reads the secret from stdout (or writes it to
     stdin when storing).  The command comes from the configuration, so only use
     a configuration file you trust.
 ``file``
     A JSON file with mode 0600 in the data directory.  This is *not*
     encryption; it only prevents other users on the machine from reading the
-    secret.  pyCert warns when it creates one.
+    secret.  pyCertWiz warns when it creates one.
 ``env`` / ``prompt``
     Read-only backends for CI and interactive use.
 
@@ -37,19 +42,39 @@ import sys
 import threading
 from pathlib import Path
 
-from .compat import subprocess_run
 from .config import SecretConfig
 from .errors import PyCertError, SecretError
 from .util import atomic_write, check_private_permissions, ensure_dir, read_private_file
 
 __all__ = ["SecretStore", "generate_secret", "BACKENDS"]
 
-BACKENDS = ("auto", "keychain", "secret-service", "file", "command", "env", "prompt")
+BACKENDS = ("auto", "keychain", "secret-service", "keyring", "file", "command", "env", "prompt")
 
-# Characters allowed in a secret stored via the macOS security(1) command
-# interpreter.  Quoting rules there are minimal, so refuse anything that could
-# be misparsed rather than risk writing a truncated secret.
-_KEYCHAIN_SAFE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-=+[]{}:,.?/|~")
+
+
+def _keychain_password(output: str) -> str:
+    """Parse the ``password:`` line of ``security find-generic-password -g``.
+
+    security(1) prints a printable-ASCII secret quoted (``password: "s3cr*t"``)
+    and anything else as hex (``password: 0x77C3B6...  "w\303\266..."``), so
+    every byte sequence round-trips unambiguously.  (``-w`` prints the latter
+    as bare hex, which cannot be told apart from a secret made of hex digits.)
+    """
+    for line in output.splitlines():
+        if not line.startswith("password:"):
+            continue
+        value = line[len("password:") :].lstrip(" ")
+        if not value:
+            return ""
+        if value.startswith("0x"):
+            try:
+                return bytes.fromhex(value[2:].split()[0]).decode("utf-8")
+            except (ValueError, IndexError, UnicodeDecodeError) as exc:
+                raise SecretError(f"could not decode the secret returned by the keychain: {exc}") from exc
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            return value[1:-1]
+        break
+    raise SecretError("unexpected output from 'security find-generic-password'")
 
 
 def generate_secret(length: int = 32) -> str:
@@ -72,7 +97,7 @@ class SecretStore:
     def _subprocess(self, args, **kwargs):
         kwargs.setdefault("timeout", self.config.command_timeout)
         try:
-            return subprocess_run(args, **kwargs)
+            return subprocess.run(args, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise SecretError("secret command timed out after %.1fs" % self.config.command_timeout) from exc
 
@@ -142,6 +167,19 @@ class SecretStore:
             raise SecretError("'secret-tool' is required for the secret-service backend")
         if backend == "command" and not self.config.command:
             raise SecretError("secrets.command is empty")
+        if backend == "keyring":
+            self._keyring()
+
+    @staticmethod
+    def _keyring():
+        try:
+            import keyring
+            import keyring.errors
+        except ImportError as exc:
+            raise SecretError(
+                "the keyring backend needs the 'keyring' package: pip install 'pyCertWiz[keyring]'"
+            ) from exc
+        return keyring
 
     def __str__(self) -> str:
         return f"{self.backend} ({self.service}/{self.config.account})"
@@ -186,7 +224,10 @@ class SecretStore:
                     "the prompt backend cannot generate a saved secret; "
                     "run 'pycert secret set' with a persistent backend"
                 )
-            existing = self.get(account, allow_missing=True)
+            # Read through _get so a locked or failing backend raises instead of
+            # looking "missing": generating here would overwrite the saved secret
+            # and make every key encrypted with it unreadable.
+            existing = self._get(account)
             if existing:
                 return existing
             if self.backend == "env":
@@ -238,9 +279,17 @@ class SecretStore:
         key = f"{self.service}/{account}"
         if self.backend == "file":
             return self._read_file().get(key)
+        if self.backend == "keyring":
+            keyring = self._keyring()
+            try:
+                return keyring.get_password(self.service, account)
+            except keyring.errors.KeyringError as exc:
+                # A locked or unavailable keyring must not look like "missing":
+                # ensure() would otherwise overwrite the saved secret.
+                raise SecretError(f"could not read the secret from the OS keyring: {exc}") from exc
         if self.backend == "keychain":
             result = self._subprocess(
-                ["security", "find-generic-password", "-a", account, "-s", self.service, "-w"],
+                ["security", "find-generic-password", "-a", account, "-s", self.service, "-g"],
                 capture_output=True,
                 text=True,
             )
@@ -253,7 +302,7 @@ class SecretStore:
                     "could not read the secret from the macOS keychain "
                     f"({result.stderr.strip() or 'unknown error'}); is the login keychain unlocked?"
                 )
-            return result.stdout[:-1] if result.stdout.endswith("\n") else result.stdout
+            return _keychain_password(result.stderr)
         if self.backend == "secret-service":
             result = self._subprocess(
                 ["secret-tool", "lookup", "service", self.service, "account", account],
@@ -266,7 +315,14 @@ class SecretStore:
         if self.backend == "command":
             result = self._subprocess(self.config.command, shell=True, capture_output=True, text=True)
             if result.returncode != 0:
-                return None
+                # A locked or unreachable password manager must not look like
+                # "no secret saved": ensure() would then generate a new one and
+                # keys would be encrypted with a passphrase nobody has.
+                detail = (result.stderr or "").strip()[:200] or f"exit status {result.returncode}"
+                raise SecretError(
+                    f"the secret command failed ({detail}); store the passphrase in your password "
+                    "manager first, or check that it is unlocked"
+                )
             value = result.stdout.strip()
             return value or None
         if self.backend == "env":
@@ -277,6 +333,13 @@ class SecretStore:
 
     def _set(self, account: str, value: str) -> None:
         key = f"{self.service}/{account}"
+        if self.backend == "keyring":
+            keyring = self._keyring()
+            try:
+                keyring.set_password(self.service, account, value)
+            except keyring.errors.KeyringError as exc:
+                raise SecretError(f"could not store the secret in the OS keyring: {exc}") from exc
+            return
         if self.backend == "file":
             with self._file_lock():
                 data = self._read_file()
@@ -291,13 +354,13 @@ class SecretStore:
                 self._write_file(data)
             return
         if self.backend == "keychain":
-            bad = set(value) - _KEYCHAIN_SAFE
-            if bad:
-                raise SecretError(
-                    "the keychain backend cannot store secrets containing "
-                    f"{''.join(sorted(bad))!r}; use a generated secret or another backend"
-                )
-            command = f'add-generic-password -U -a {_quote(account)} -s {_quote(self.service)} -w "{value}"\n'
+            # -X takes the secret as hex, so any character (including quotes,
+            # backslashes and non-ASCII) is stored exactly; the command goes to
+            # 'security -i' on stdin, so the secret never appears in argv.
+            command = (
+                f"add-generic-password -U -a {_quote(account)} -s {_quote(self.service)} "
+                f"-X {value.encode('utf-8').hex()}\n"
+            )
             result = self._subprocess(["security", "-i"], input=command, capture_output=True, text=True)
             if result.returncode != 0:
                 raise SecretError(
@@ -310,7 +373,7 @@ class SecretStore:
                 [
                     "secret-tool",
                     "store",
-                    f"--label=pyCert {self.service} {account}",
+                    f"--label=pyCertWiz {self.service} {account}",
                     "service",
                     self.service,
                     "account",
@@ -338,6 +401,15 @@ class SecretStore:
 
     def _delete(self, account: str) -> bool:
         key = f"{self.service}/{account}"
+        if self.backend == "keyring":
+            keyring = self._keyring()
+            try:
+                keyring.delete_password(self.service, account)
+            except keyring.errors.PasswordDeleteError:
+                return False
+            except keyring.errors.KeyringError as exc:
+                raise SecretError(f"could not delete the secret from the OS keyring: {exc}") from exc
+            return True
         if self.backend == "file":
             with self._file_lock():
                 data = self._read_file()

@@ -1,7 +1,7 @@
 # The CA protocol, as implemented
 
 There is no public specification for the UK e-Science CA’s client API.
-This document records the wire protocol pyCert implements, derived from
+This document records the wire protocol pyCertWiz implements, derived from
 CertWizard’s source and verified against the live server where possible. If the
 CA changes, this is the file to update. For the fuller **listener** contract
 (including the Java client's quirks, TLS truststore pinning and a runnable
@@ -20,7 +20,7 @@ sandbox), see [CA_LISTENER.md](CA_LISTENER.md).
 
 ## Transport policy
 
-pyCert does not use a general-purpose HTTP library for CA calls.  The transport
+pyCertWiz does not use a general-purpose HTTP library for CA calls.  The transport
 (`pycert/transport.py`) enforces total deadlines, bounded DNS and connect
 attempts, strict response framing (length/chunk validation, header and body
 limits), retries only for idempotent requests, same-host redirects only, and
@@ -65,10 +65,10 @@ Observed with the live server:
 
 * the `<certificates>` list contains **historic** CA certificates (expired in
   2007 and 2011), not the ones currently issuing. Never use it as a trust
-  source; pyCert only displays it (`pycert info`). Trust comes from the pinned
+  source; pyCertWiz only displays it (`pycert info`). Trust comes from the pinned
   chain in the configuration.
 * `/CA/motd/text` returns an XML document (`<CA><Motd><text>…`), not plain text.
-  pyCert extracts the `<text>` elements.
+  pyCertWiz extracts the `<text>` elements.
 
 ### `POST /CSR`
 
@@ -89,7 +89,7 @@ Request:
 Responses:
 
 * `201 Created` — accepted; the CSR is now `NEW`.
-* `202 Accepted` — rejected. The body is an error document; pyCert reads the
+* `202 Accepted` — rejected. The body is an error document; pyCertWiz reads the
   `<text>` element(s), preferring the ones under `<minor>`:
 
   ```xml
@@ -101,14 +101,14 @@ Responses:
 
 The PIN is hashed **client-side** and the RA compares the hash; the server never
 sees the PIN. CertWizard’s `HashUtil` uses SHA-1 and upper-case hex, and so does
-pyCert (`csr.pin_hash = "sha1"`).
+pyCertWiz (`csr.pin_hash = "sha1"`).
 
 The server enforces that the `<Email>` element matches the CSR’s e-mail SAN for
 user requests; a mismatch comes back as a 202 with a message.
 
 ### `POST /CSRs` (host; legacy renewal)
 
-pyCert now follows current Java CertWizard and posts renewals to `/CSR`
+pyCertWiz now follows current Java CertWizard and posts renewals to `/CSR`
 with the `PPPK` header. Older clients used `/CSRs`; a listener should accept
 both. The request shapes below are the same on either path.
 
@@ -161,7 +161,7 @@ Because this uses the private exponent, PPPK only works with RSA keys. ECDSA
 certificates can be issued and used normally but cannot authenticate a renewal
 or host request with this server.
 
-pyCert checks that the `keyid` modulus equals the key it is about to use and
+pyCertWiz checks that the `keyid` modulus equals the key it is about to use and
 refuses to answer a challenge for a different key.
 
 ### `POST /resources/resource/publickey/pk`
@@ -199,7 +199,7 @@ Response `200`:
 * Certificate statuses: `VALID`, plus terminal states such as `REVOKED`,
   `EXPIRED`, `SUSPENDED`.
 
-pyCert uses this endpoint as the single source of truth for progress: it *never*
+pyCertWiz uses this endpoint as the single source of truth for progress: it *never*
 relies on an ID returned by `/CSR` (there isn’t one), it polls by the public key
 it generated.
 
@@ -209,7 +209,7 @@ it generated.
 <certificate><X509Certificate>-----BEGIN CERTIFICATE-----…</X509Certificate></certificate>
 ```
 
-pyCert also accepts a bare PEM/DER body. Certificate IDs must match
+pyCertWiz also accepts a bare PEM/DER body. Certificate IDs must match
 `[A-Za-z0-9._-]+` before being placed in the URL.
 
 ### `POST /revoke`
@@ -223,7 +223,7 @@ challenges with that certificate’s key). Reasons offered by pyCert:
 `unspecified`, `keyCompromise`, `cACompromise`, `affiliationChanged`,
 `superseded`, `cessationOfOperation`, `certificateHold`.
 
-## Status model in pyCert
+## Status model in pyCertWiz
 
 ```
 DRAFT ──submit──> SUBMITTED ──RA approves──> APPROVED ──CA signs──> SIGNED

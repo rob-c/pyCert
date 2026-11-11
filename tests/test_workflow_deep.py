@@ -188,7 +188,7 @@ def test_renew_due_records_failure(ctx, config, ca, issued):
     state = issued()
     state.cert.not_after = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=10)).isoformat()
     ctx.store.save(state)
-    ca.reject_next = [(202, ca._error_xml("no renewal"))]
+    ca.fail_next("/CSR", status=202, body=ca._error_xml("no renewal"))
     results = renew_due(ctx, 30, progress=lambda _m: None)
     assert len(results) == 1
     assert "no renewal" in results[0][1]

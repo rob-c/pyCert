@@ -1,7 +1,7 @@
-"""Canonical application-level comparison of CertWizard and pyCert requests.
+"""Canonical application-level comparison of CertWizard and pyCertWiz requests.
 
 The Java project's golden fixtures are byte-level recordings from the original
-Restlet implementation.  pyCert intentionally uses a different hardened HTTP
+Restlet implementation.  pyCertWiz intentionally uses a different hardened HTTP
 transport, so comparing raw bytes would only produce noise (connection framing,
 User-Agent, compression negotiation).  This module strips those transport
 details and keeps exactly the parts the CA listener and the Java application
@@ -26,7 +26,7 @@ from pathlib import Path
 FIXTURES = Path(__file__).parent / "fixtures" / "certwizard_golden" / "requests"
 
 # Headers which only describe identity or message framing.  Java's Restlet
-# recording used chunked bodies and Keep-Alive; java.net.http and pyCert use
+# recording used chunked bodies and Keep-Alive; java.net.http and pyCertWiz use
 # Content-Length/close.  None of these change the CA protocol.
 _IGNORED_HEADERS = {
     "host",

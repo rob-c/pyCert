@@ -3,6 +3,7 @@ import stat
 import subprocess
 
 import pytest
+from openssl_support import legacy_pkcs12_args
 
 from pycert import certs
 from pycert import p12 as p12_module
@@ -162,7 +163,7 @@ def test_legacy_pkcs12_can_be_imported(tmp_path):
             OPENSSL,
             "pkcs12",
             "-export",
-            "-legacy",
+            *legacy_pkcs12_args(),
             "-in",
             str(cert),
             "-inkey",

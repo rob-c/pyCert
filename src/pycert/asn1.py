@@ -1,6 +1,6 @@
 """Minimal DER encoder used by the PKCS#12 writer.
 
-Only encoding is implemented: pyCert reads certificates and PKCS#12 through
+Only encoding is implemented: pyCertWiz reads certificates and PKCS#12 through
 ``cryptography``/OpenSSL, but writes the PKCS#12 container itself so the same
 modern algorithms are used on every Python version (older ``cryptography``
 releases write legacy 3DES/SHA-1 PKCS#12).  The encoder is deliberately small
@@ -57,7 +57,7 @@ def encode_length(length):
 def tlv(tag_class, constructed, tag_number, content):
     first = (tag_class << 6) | (0x20 if constructed else 0)
     if tag_number >= 0x1F:
-        raise ValueError("high tag numbers are not used by pyCert")
+        raise ValueError("high tag numbers are not used by pyCertWiz")
     return bytes((first | tag_number,)) + encode_length(len(content)) + content
 
 

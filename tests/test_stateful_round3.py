@@ -2,13 +2,10 @@
 
 import random
 import stat
-import tomllib
 
 import pytest
-from test_toml import _generate
 
 from pycert.store import STATUSES, Store
-from pycert.toml import loads
 
 
 @pytest.mark.parametrize("seed", range(100))
@@ -42,10 +39,3 @@ def test_random_store_sequences_round3(tmp_path, seed):
     for item in store.list():
         assert stat.S_IMODE(store.path(item).stat().st_mode) == 0o700
         assert stat.S_IMODE(store.file(item, "state.json").stat().st_mode) == 0o600
-
-
-@pytest.mark.parametrize("seed", range(50))
-def test_generated_toml_round3(seed):
-    doc, expected = _generate(seed + 3000)
-    assert loads(doc) == expected
-    assert tomllib.loads(doc) == expected

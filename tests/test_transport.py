@@ -723,7 +723,7 @@ def test_connect_timeout_is_retryable():
     ]
 
     def factory(family, socktype, proto):
-        raise socket.timeout("connect timed out")
+        raise TimeoutError("connect timed out")
 
     transport._socket_factory = factory
     with pytest.raises(TransportError) as exc:

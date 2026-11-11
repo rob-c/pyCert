@@ -25,7 +25,7 @@ def roundtrip(config):
 VALID = [
     ("ca.base_url", "https://ca.example.org:8443"),
     ("ca.version_string", "CertWizard 2.2.1"),
-    ("ca.user_agent", "pyCert/test"),
+    ("ca.user_agent", "pyCertWiz/test"),
     ("ca.timeout", 12.5),
     ("ca.connect_timeout", 4.5),
     ("ca.deadline", 120.0),

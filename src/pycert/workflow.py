@@ -6,7 +6,7 @@ identical in both and makes the whole flow testable without a display.
 
 Every function takes an :class:`AppContext` (configuration, local store, secret
 store) and an optional ``progress`` callback that receives short, human-readable
-lines.  Callbacks must not raise; pyCert treats progress reporting as best
+lines.  Callbacks must not raise; pyCertWiz treats progress reporting as best
 effort.
 
 No function ever logs or returns the PIN, the PKCS#12 passphrase or private key
@@ -20,9 +20,11 @@ import re
 import secrets as secrets_module
 import time
 import unicodedata
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -31,23 +33,23 @@ from cryptography.x509.oid import NameOID
 from . import certs, chain
 from . import csr as csr_module
 from . import p12 as p12_module
-from .ca import RA, CAClient, Lookup
-from .compat import dataclass, field, merge_dicts, not_valid_after, not_valid_before
-from .config import Config
+from .ca import RA, CAClient
+from .certs import not_valid_after, not_valid_before
+from .config import CAProfile, Config
 from .errors import (
     CAError,
     ChainError,
     ConfigError,
     CryptoError,
     NotFound,
-    ProtocolError,
     PyCertError,
     TimeoutWaiting,
 )
 from .p12 import P12Bundle
+from .providers.base import PollOutcome
 from .secrets_store import SecretStore
 from .store import (
-    STATUS_APPROVED,
+    PENDING_STATUSES,
     STATUS_DOWNLOADED,
     STATUS_FAILED,
     STATUS_IMPORTED,
@@ -91,6 +93,15 @@ class AppContext:
     config: Config
     store: Store
     secrets: SecretStore
+    #: Front-end hook for steps a person must complete (e.g. publishing a DNS
+    #: TXT record for a manual ACME dns-01 challenge).  Called with a title and
+    #: instructions; returns True when the person confirms they are done.
+    #: ``None`` means unattended: such steps fail with a clear error instead.
+    confirm: "Callable[[str, str], bool] | None" = None
+    #: Java keystore passphrases given in this session (never stored anywhere)
+    keystore_passwords: dict = field(default_factory=dict)
+    #: Front-end hook asking for a keystore passphrase (link -> passphrase or None)
+    ask_keystore_password: "Callable[[Any], str | None] | None" = None
 
     @classmethod
     def from_config(cls, config: Config) -> "AppContext":  # noqa: F821
@@ -108,24 +119,54 @@ class AppContext:
         account = self.config.secrets.key_account or self.config.secrets.account
         return self.secrets.ensure(account)
 
+    # -- CA profiles and providers ------------------------------------------
+    def profile(self, name: "str | None" = "") -> CAProfile:
+        """The CA profile *name* (empty: the primary CA)."""
+        return self.config.profile_for(name)
+
+    def provider(self, name: "str | None" = ""):
+        """The protocol provider for CA profile *name* (empty: the primary CA)."""
+        from .providers import create_provider
+
+        return create_provider(self, self.profile(name))
+
+    def provider_for(self, state: RequestState):
+        return self.provider(state.ca)
+
     # -- network -----------------------------------------------------------
-    def client(self) -> CAClient:
-        return CAClient(self.config)
+    def client(self, ca: str = "") -> CAClient:
+        """A CertWizard-protocol client for CA profile *ca* (empty: the primary CA)."""
+        if not ca:
+            return CAClient(self.config)
+        profile = self.profile(ca)
+        if profile.kind != "ukca":
+            raise ConfigError(f"CA profile '{ca}' is an {profile.kind} CA, not a CertWizard-protocol CA")
+        return CAClient(profile)
 
     # -- trust -------------------------------------------------------------
-    def anchors(self) -> "list[x509.Certificate]":
-        anchors = list(self.config.bundle.anchors)
-        if self.config.use_system_trust():
+    def anchors(self, ca: str = "") -> "list[x509.Certificate]":
+        profile = self.profile(ca)
+        if profile.primary:
+            anchors = list(self.config.bundle.anchors)
+            system = self.config.use_system_trust()
+        else:
+            anchors = list(profile.bundle.anchors)
+            system = profile.use_system_trust() or not anchors
+        if system:
             anchors.extend(chain.system_anchors())
         return anchors
 
-    def build_chain(self, certificate: x509.Certificate) -> chain.ChainResult:
+    def build_chain(
+        self, certificate: x509.Certificate, ca: str = "", extra: "list[x509.Certificate] | tuple" = ()
+    ) -> chain.ChainResult:
+        profile = self.profile(ca)
+        bundle = self.config.bundle if profile.primary else profile.bundle
         return chain.build_chain(
             certificate,
-            anchors=self.anchors(),
-            extra=list(self.config.bundle.certificates),
+            anchors=self.anchors(ca),
+            extra=list(bundle.certificates) + list(extra),
             fetcher=chain.aia_fetch,
-            allow_sha1=self.config.ca.allow_sha1,
+            allow_sha1=profile.ca.allow_sha1,
         )
 
 
@@ -161,6 +202,14 @@ def normalize_common_name(value: str, cert_type: str) -> str:
     if any(len(word) > 64 for word in words):
         raise PyCertError("the common name is too long")
     return lowered
+
+
+def _normalize_name(value: str, cert_type: str, *, wildcard: bool = False) -> str:
+    """Normalise a name; CAs that validate domains (ACME) also accept '*.example.org'."""
+    text = " ".join(value.split())
+    if wildcard and cert_type == "host" and text.startswith("*."):
+        return "*." + normalize_common_name(text[2:], "host")
+    return normalize_common_name(value, cert_type)
 
 
 def validate_email(value: str) -> str:
@@ -267,20 +316,30 @@ class RequestSpec:
     csr_extensions: "list[str] | None" = None
     csr_hash: str = ""
     auth_alias: str = ""
+    #: CA profile name; filled in by :meth:`build` (the configuration's default_ca)
+    ca: str = ""
+    description: str = ""
+    #: linked keystore to store the certificate in once issued
+    keystore: str = ""
 
     @classmethod
     def build(cls, config: Config, cn: str, **overrides) -> "RequestSpec":  # noqa: F821
+        from .providers import capabilities_for
+
+        profile = config.profile_for(overrides.pop("ca", "") or config.default_ca)
+        caps = capabilities_for(profile.kind)
+        identity = profile.identity
         spec = cls(
             cn=cn,
             type=overrides.pop("type", "user"),
-            email=overrides.pop("email", "") or config.identity.email,
+            email=overrides.pop("email", "") or identity.email or (profile.contact_emails() or [""])[0],
             alias=overrides.pop("alias", ""),
-            ou=overrides.pop("ou", "") or config.identity.ou,
-            l=overrides.pop("l", "") or config.identity.l,
-            o=overrides.pop("o", "") or config.identity.o,
-            c=overrides.pop("c", "") or config.identity.c,
-            st=overrides.pop("st", "") or config.identity.st,
-            ra=overrides.pop("ra", "") or config.identity.ra,
+            ou=overrides.pop("ou", "") or identity.ou,
+            l=overrides.pop("l", "") or identity.l,
+            o=overrides.pop("o", "") or identity.o,
+            c=overrides.pop("c", "") or identity.c,
+            st=overrides.pop("st", "") or identity.st,
+            ra=overrides.pop("ra", "") or identity.ra,
             key_algorithm=overrides.pop("key_algorithm", "") or config.keys.algorithm,
             rsa_bits=overrides.pop("rsa_bits", 0) or config.keys.rsa_bits,
             ec_curve=overrides.pop("ec_curve", "") or config.keys.ec_curve,
@@ -291,29 +350,46 @@ class RequestSpec:
             csr_extensions=overrides.pop("csr_extensions", None) or list(config.csr.extensions),
             csr_hash=overrides.pop("csr_hash", "") or config.csr.hash,
             auth_alias=overrides.pop("auth_alias", "") or "",
+            ca=profile.name,
+            description=str(overrides.pop("description", "") or ""),
+            keystore=str(overrides.pop("keystore", "") or ""),
         )
+        if spec.keystore:
+            config.keystore(spec.keystore)  # must be linked
         if overrides:
             raise TypeError(f"unexpected request options: {', '.join(sorted(overrides))}")
         if spec.type not in ("user", "host"):
             raise PyCertError("certificate type must be 'user' or 'host'")
-        spec.cn = normalize_common_name(spec.cn, spec.type)
+        if spec.type == "user" and not caps.user_certificates:
+            raise PyCertError(f"{profile.display_name} only issues host certificates; use --type host")
+        if spec.type == "host" and not caps.host_certificates:
+            raise PyCertError(f"{profile.display_name} only issues personal certificates")
+        spec.cn = _normalize_name(spec.cn, spec.type, wildcard=caps.domain_validation)
         spec.email = validate_email(spec.email)
-        if spec.ra:
-            spec.ou, spec.l = parse_ra(spec.ra)
-        if not spec.ou or not spec.l:
-            raise PyCertError(
-                "an RA is required: set identity.ra / identity.ou / identity.l in the "
-                "configuration, or pass --ra 'OU L'"
-            )
+        if caps.ra:
+            if spec.ra:
+                spec.ou, spec.l = parse_ra(spec.ra)
+            if not spec.ou or not spec.l:
+                raise PyCertError(
+                    "an RA is required: set identity.ra / identity.ou / identity.l in the "
+                    "configuration, or pass --ra 'OU L'"
+                )
         if spec.type == "user" and spec.auth_alias:
             raise PyCertError("only host certificate requests can be authenticated with a certificate")
-        if spec.type == "host" and not spec.auth_alias:
+        if caps.host_authentication and spec.type == "host" and not spec.auth_alias:
             raise PyCertError(
                 "host certificate requests must be authenticated by an existing certificate: "
                 "pass --auth <alias> (see 'pycert list')"
             )
-        for key in spec.san_dns:
-            normalize_common_name(key, "host")
+        if not caps.host_authentication and spec.auth_alias:
+            raise PyCertError(f"{profile.display_name} does not authenticate requests with an existing certificate")
+        if not caps.pin:
+            spec.pin = ""
+        spec.san_dns = [_normalize_name(name, "host", wildcard=caps.domain_validation) for name in spec.san_dns]
+        if spec.type == "host" and spec.san_dns and spec.cn.lower() not in (n.lower() for n in spec.san_dns):
+            # TLS clients ignore the CN once a SAN is present: a host certificate
+            # must list its own name among the DNS SANs, first.
+            spec.san_dns.insert(0, spec.cn)
         for ip in spec.san_ip:
             import ipaddress
 
@@ -325,9 +401,14 @@ class RequestSpec:
             validate_email(email)
         if spec.pin and len(spec.pin) < PIN_MIN_LENGTH:
             raise PyCertError(f"the PIN must be at least {PIN_MIN_LENGTH} characters")
+        if not caps.organisation_subject:
+            spec.o = spec.ou = spec.l = spec.st = ""
+            spec.ra = ""
         return spec
 
     def subject(self) -> x509.Name:
+        if not (self.o or self.ou or self.l):
+            return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, self.cn)])
         return certs.build_subject(
             common_name=self.cn,
             organization=self.o,
@@ -343,7 +424,9 @@ class RequestSpec:
 # ---------------------------------------------------------------------------
 
 
-def _submission_message(message: str, alias: str) -> str:
+def _submission_message(message: str, alias: str, provider=None) -> str:
+    if provider is not None and not provider.capabilities.manual_approval:
+        return f"{message}. Run 'pycert wait {alias}' to collect the certificate."
     return (
         f"{message}. An RA must approve the request and a CA operator must sign it. "
         f"Run 'pycert wait {alias}' (or 'pycert status --refresh') to poll for the certificate."
@@ -368,36 +451,19 @@ def create_request(
     if ctx.store.exists(alias):
         raise PyCertError(f"a certificate request called '{alias}' already exists (use --alias)")
 
+    provider = ctx.provider(spec.ca)
+    provider.validate_request(spec)
     progress("Preparing request...")
-    client = ctx.client()
-    if not client.ping():
-        detail = f" ({client.last_error})" if client.last_error else ""
-        raise CAError(
-            f"cannot reach the CA server at {ctx.config.ca.base_url}{detail}. "
-            "Check your network, proxy, TLS pin and ca.base_url."
-        )
+    prepared = provider.preflight(spec, progress=progress, stop_event=stop_event)
 
-    auth_cert = auth_key = None
-    if spec.type == "host":
-        auth_state = ctx.store.get(spec.auth_alias)
-        try:
-            auth_cert = ctx.store.load_certificate(auth_state)
-        except NotFound as exc:
-            raise PyCertError(
-                f"the authenticating certificate '{spec.auth_alias}' has not been issued yet"
-            ) from exc
-        if not certs.certificate_valid_at(auth_cert):
-            raise PyCertError(
-                f"the authenticating certificate '{spec.auth_alias}' is outside its validity period"
-            )
-        auth_key = ctx.store.load_key(auth_state, ctx.key_passphrase())
-        if not certs.certificate_matches_key(auth_cert, auth_key):
-            raise PyCertError(
-                f"the private key stored for '{spec.auth_alias}' does not match its certificate"
-            )
-
-    key = generate_key(ctx.config, progress)
-    subject = spec.subject()
+    key = generate_key(
+        ctx.config,
+        progress,
+        algorithm=spec.key_algorithm,
+        rsa_bits=spec.rsa_bits,
+        ec_curve=spec.ec_curve,
+    )
+    subject = provider.subject_for(spec)
     progress(f"Building the PKCS#10 request for '{subject.rfc4514_string()}'...")
     request = csr_module.build_csr(
         key,
@@ -413,14 +479,11 @@ def create_request(
     if not csr_module.signature_valid(request):
         raise CryptoError("the generated CSR does not verify against its own public key")
 
-    pin = spec.pin or generate_pin()
-    if not spec.pin:
-        _report_pin(pin, on_pin, progress)
-    if len(pin) < PIN_MIN_LENGTH:
-        raise PyCertError(f"the PIN must be at least {PIN_MIN_LENGTH} characters")
-    hashed_pin = pin_hash(pin, ctx.config.csr.pin_hash)
-
     state = ctx.store.new_state(alias=alias, type=spec.type, cn=spec.cn, email=spec.email)
+    state.ca = provider.name
+    state.description = spec.description
+    if spec.keystore:
+        state.keystore = {"name": spec.keystore, "alias": alias, "written": ""}
     state.subject = subject.rfc4514_string()
     state.key_algorithm = certs.key_description(key.public_key())
     state.key_bits = key.key_size if isinstance(key, (rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey)) else 0
@@ -434,19 +497,10 @@ def create_request(
     ctx.store.save_csr(state, request)
     ctx.store.save(state)
 
-    progress("Submitting to the CA...")
     try:
-        if spec.type == "host":
-            submission = client.submit_authenticated(
-                csr_pem=csr_module.csr_pem(request),
-                pin_hash=hashed_pin,
-                email=spec.email,
-                auth_cert=auth_cert,
-                auth_key=auth_key,
-                host_request=True,
-            )
-        else:
-            submission = client.submit_csr(csr_module.csr_pem(request), hashed_pin, spec.email)
+        submission = provider.submit(
+            state, request, spec, prepared=prepared, progress=progress, on_pin=on_pin, stop_event=stop_event
+        )
     except PyCertError as exc:
         state.set_status(STATUS_FAILED, f"submission failed: {exc}")
         ctx.store.save(state)
@@ -461,7 +515,7 @@ def create_request(
     state.submitted_at = iso()
     state.set_status(STATUS_SUBMITTED, submission.message)
     ctx.store.save(state)
-    progress(_submission_message(submission.message, state.alias))
+    progress(_submission_message(submission.message, state.alias, provider))
 
     if wait:
         state = wait_for_certificate(
@@ -482,122 +536,11 @@ def create_request(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class PollOutcome:
-    state: RequestState
-    server_status: str
-    pending: bool
-    message: str
-    certificate: "x509.Certificate | None" = None
-    cert_id: str = ""
-    terminal: bool = False
-
-
-_CSR_STATUS_MAP = {
-    "NEW": STATUS_SUBMITTED,
-    "RENEW": STATUS_SUBMITTED,
-    "APPROVED": STATUS_APPROVED,
-    "DELETED": STATUS_FAILED,
-}
-
-_CSR_DESCRIPTIONS = {
-    "NEW": "submitted, awaiting RA approval",
-    "RENEW": "renewal submitted, awaiting RA approval",
-    "APPROVED": "approved by the RA, awaiting CA operator signing",
-    "DELETED": "deleted by the CA",
-}
-
-_CERT_TERMINAL = {"REVOKED", "EXPIRED", "SUSPENDED", "DELETED"}
-
-
 def poll_once(
     ctx: AppContext, state: RequestState, *, progress: Progress = noop, stop_event=None
 ) -> PollOutcome:
-    """Ask the CA for the status of the key used by this request."""
-    spki = state.active_spki_b64
-    if not spki:
-        raise PyCertError(f"'{state.alias}' has no public key recorded; cannot query the CA")
-    client = ctx.client()
-    lookup: Lookup = client.lookup_public_key(spki, stop_event=stop_event)
-    state.server.last_checked = iso()
-
-    certificate_entry = lookup.latest_certificate
-    if certificate_entry is not None:
-        state.server.cert_id = certificate_entry.id
-        state.server.status = certificate_entry.status
-        state.server.owner = certificate_entry.owner
-        state.server.role = certificate_entry.role
-        state.server.email = certificate_entry.email
-        state.server.start_date = certificate_entry.start_date
-        state.server.end_date = certificate_entry.end_date
-        state.server.life_days = certificate_entry.life_days
-        state.server.renew = certificate_entry.renew
-
-        if certificate_entry.status.upper() in _CERT_TERMINAL:
-            ctx.store.save(state)
-            return PollOutcome(
-                state=state,
-                server_status=certificate_entry.status,
-                pending=False,
-                message=f"the CA reports the certificate as {certificate_entry.status}",
-                terminal=True,
-            )
-        certificate = certificate_entry.certificate()
-        if certificate is None and certificate_entry.id:
-            progress(f"Downloading certificate {certificate_entry.id}...")
-            certificate = client.download_certificate(certificate_entry.id, stop_event=stop_event)
-        if certificate is not None:
-            if not _public_key_matches(certificate, state, ctx):
-                raise ProtocolError(
-                    "the CA returned a certificate whose public key does not match this request; "
-                    "refusing to use it"
-                )
-            ctx.store.save(state)
-            return PollOutcome(
-                state=state,
-                server_status=certificate_entry.status,
-                pending=False,
-                message=f"certificate available (status {certificate_entry.status})",
-                certificate=certificate,
-                cert_id=certificate_entry.id,
-            )
-        ctx.store.save(state)
-        return PollOutcome(
-            state, certificate_entry.status or "UNKNOWN", True, "waiting for a certificate body"
-        )
-
-    csr_entry = lookup.latest_csr
-    if csr_entry is not None:
-        state.server.csr_id = csr_entry.id
-        state.server.status = csr_entry.status
-        state.server.owner = csr_entry.owner
-        state.server.role = csr_entry.role
-        state.server.email = csr_entry.email
-        mapped = _CSR_STATUS_MAP.get(csr_entry.status.upper(), state.status)
-        description = _CSR_DESCRIPTIONS.get(csr_entry.status.upper(), f"status {csr_entry.status}")
-        terminal = mapped == STATUS_FAILED
-        if mapped != state.status:
-            state.set_status(mapped, description)
-        else:
-            state.touch()
-        ctx.store.save(state)
-        return PollOutcome(
-            state=state,
-            server_status=csr_entry.status,
-            pending=not terminal,
-            message=description,
-            terminal=terminal,
-        )
-
-    # The server may not have indexed the request yet.
-    state.touch()
-    ctx.store.save(state)
-    return PollOutcome(
-        state=state,
-        server_status="",
-        pending=True,
-        message="the CA does not know this public key yet (the request may still be processing)",
-    )
+    """Ask the request's CA for its status (and the certificate once issued)."""
+    return ctx.provider_for(state).poll(state, progress=progress, stop_event=stop_event)
 
 
 def _public_key_matches(certificate: x509.Certificate, state: RequestState, ctx: AppContext) -> bool:
@@ -638,6 +581,7 @@ def wait_for_certificate(
                 progress=progress,
                 export=export,
                 require_verified_chain=require_verified_chain,
+                chain_hint=getattr(outcome, "chain", None) or [],
             )
         if outcome.terminal:
             raise CAError(f"the CA reports this request as '{outcome.server_status}' ({outcome.message})")
@@ -680,8 +624,11 @@ def download_and_export(
     require_verified_chain: bool = True,
     password: "str | None" = None,
     out: "Path | None" = None,
+    chain_hint: "list[x509.Certificate] | None" = None,
+    deploy: bool = True,
 ) -> RequestState:
-    """Verify an issued certificate, store it with its chain, and export a .p12."""
+    """Verify an issued certificate, store it with its chain, export a .p12 and deploy."""
+    chain_hint = list(chain_hint or [])
     if certificate is None:
         outcome = poll_once(ctx, state, progress=progress, stop_event=stop_event)
         if outcome.certificate is None:
@@ -691,6 +638,7 @@ def download_and_export(
             )
         certificate = outcome.certificate
         cert_id = outcome.cert_id or cert_id
+        chain_hint = list(getattr(outcome, "chain", None) or [])
 
     renewal = state.renewal
     key = (
@@ -711,12 +659,17 @@ def download_and_export(
         )
 
     issued_cn = certs.name_attribute(certificate.subject, NameOID.COMMON_NAME) or ""
-    if issued_cn.lower() != state.cn.lower():
+    if state.keystore and not state.cert.sha256:
+        # A request imported from a Java keystore (a CertWizard placeholder):
+        # the issued certificate is the authority on its name and kind.
+        state.cn = issued_cn or state.cn
+        state.type = certs.certificate_kind(certificate, issued_cn)
+    elif issued_cn.lower() != state.cn.lower():
         progress(f"warning: the CA issued common name '{issued_cn}' (requested '{state.cn}')")
         state.notes.append(f"issued CN differs from request: {issued_cn}")
 
     progress("Verifying the certificate chain...")
-    result = ctx.build_chain(certificate)
+    result = ctx.build_chain(certificate, state.ca, chain_hint)
     for problem in result.problems:
         progress(f"chain problem: {problem}")
 
@@ -733,18 +686,7 @@ def download_and_export(
     state.public_key_sha256 = certs.key_fingerprint(key.public_key())
 
     description = certs.describe_certificate(certificate)
-    state.cert = CertInfo(
-        subject=description.subject,
-        issuer=description.issuer,
-        serial=description.serial,
-        not_before=description.not_before.astimezone(timezone.utc).isoformat(),
-        not_after=description.not_after.astimezone(timezone.utc).isoformat(),
-        sha256=description.fingerprint_sha256.replace(":", "").lower(),
-        key=description.key,
-        sans=description.subject_alt_names,
-        chain_sha256=[certs.fingerprint(c) for c in result.chain],
-        verified=result.trusted,
-    )
+    state.cert = cert_info(description, result)
     state.server.cert_id = cert_id or state.server.cert_id
     state.server.status = "VALID" if result.trusted else (state.server.status or "")
     state.server.start_date = not_valid_before(certificate).strftime("%d/%m/%Y")
@@ -777,6 +719,27 @@ def download_and_export(
         state.set_status(STATUS_DOWNLOADED, f"PKCS#12 exported to {path}")
         state.touch()
         ctx.store.save(state)
+    if state.keystore.get("name"):
+        from .keystore import write_state
+
+        try:
+            write_state(ctx, state, progress=progress)
+        except PyCertError as exc:
+            # The certificate is safely stored; the next sync retries the write.
+            progress(f"warning: could not update keystore '{state.keystore.get('name')}': {exc}")
+            state.notes.append(f"keystore update failed: {exc}")
+            ctx.store.save(state)
+        state = ctx.store.get_by_slug(state.slug)
+    if deploy and state.deploy:
+        from .deploy import deploy_state
+
+        try:
+            deploy_state(ctx, state, progress=progress)
+        except PyCertError as exc:
+            # The certificate is safely stored; a deployment failure must not lose it.
+            progress(f"warning: deployment failed: {exc}")
+            state.notes.append(f"deployment failed: {exc}")
+            ctx.store.save(state)
     return state
 
 
@@ -797,7 +760,7 @@ def export_p12(
     )
     chain_certs = ctx.store.load_chain(state)
     if not chain_certs:
-        chain_certs = ctx.build_chain(certificate).issuers
+        chain_certs = ctx.build_chain(certificate, state.ca).issuers
     if out is None:
         filename = _format(ctx.config.p12.filename_template, state)
         if not filename.lower().endswith(".p12"):
@@ -879,17 +842,28 @@ def renew(
     dns = san_dns if san_dns is not None else existing_dns
     emails = san_email if san_email is not None else existing_email
     ips = san_ip if san_ip is not None else existing_ip
-    contact = validate_email(email or state.email or ctx.config.identity.email)
-    if not emails and state.type == "user":  # pragma: no cover - user certs normally carry e-mail
-        emails = [contact]
     cn = certs.name_attribute(subject, NameOID.COMMON_NAME) or state.cn
     if cn.lower() != state.cn.lower():
         progress(f"note: the renewed certificate keeps the existing common name '{cn}'")
 
-    client = ctx.client()
-    if not client.ping():
-        detail = f" ({client.last_error})" if client.last_error else ""
-        raise CAError(f"cannot reach the CA server at {ctx.config.ca.base_url}{detail}")
+    provider = ctx.provider_for(state)
+    if not provider.capabilities.host_certificates and state.type == "host":  # pragma: no cover - defensive
+        raise PyCertError(f"{provider.display_name} cannot renew host certificates")
+    ping = provider.ping(stop_event=stop_event)
+    if not ping.ok:
+        detail = f" ({ping.detail})" if ping.detail else ""
+        raise CAError(f"cannot reach the CA server at {provider.url}{detail}")
+
+    # Ask the CA what it holds for this certificate now (status, contact), as
+    # CertWizard does, and refuse what the CA would refuse.
+    check = check_renewal(ctx, state, email=email, progress=progress, stop_event=stop_event)
+    if check.problem:
+        raise PyCertError(f"cannot renew '{state.alias}': {check.problem}")
+    contact = check.contact
+    if check.record_email and contact.lower() != check.record_email.lower():
+        progress(f"note: the CA's contact e-mail for this certificate changes from {check.record_email} to {contact}")
+    if not emails and state.type == "user":  # pragma: no cover - user certs normally carry e-mail
+        emails = [contact]
 
     key = generate_key(ctx.config, progress, algorithm=key_algorithm, rsa_bits=rsa_bits, ec_curve=ec_curve)
     request = csr_module.build_csr(
@@ -903,10 +877,7 @@ def renew(
         extensions=ctx.config.csr.extensions,
         hash_name=ctx.config.csr.hash,
     )
-    pin_value = pin or generate_pin()
-    if not pin:
-        _report_pin(pin_value, on_pin, progress)
-    if len(pin_value) < PIN_MIN_LENGTH:
+    if pin and len(pin) < PIN_MIN_LENGTH:
         raise PyCertError(f"the PIN must be at least {PIN_MIN_LENGTH} characters")
 
     ctx.store.save_pending_key(state, key, ctx.key_passphrase())
@@ -918,16 +889,17 @@ def renew(
     state.email = contact
     ctx.store.save(state)
 
-    progress("Submitting the renewal (authenticated with the current certificate)...")
     try:
-        submission = client.submit_authenticated(
-            csr_pem=csr_module.csr_pem(request),
-            pin_hash=pin_hash(pin_value, ctx.config.csr.pin_hash),
-            email=contact,
-            auth_cert=old_certificate,
-            auth_key=old_key,
-            host_request=False,
-            public_key=modulus_exponent(old_certificate),
+        submission = provider.submit_renewal(
+            state,
+            request,
+            old_certificate=old_certificate,
+            old_key=old_key,
+            contact=contact,
+            pin=pin,
+            progress=progress,
+            on_pin=on_pin,
+            stop_event=stop_event,
         )
     except PyCertError as exc:
         ctx.store.discard_pending(state)
@@ -948,7 +920,7 @@ def renew(
     state.submitted_at = iso()
     state.set_status(STATUS_SUBMITTED, "renewal submitted")
     ctx.store.save(state)
-    progress(_submission_message("renewal submitted", state.alias))
+    progress(_submission_message("renewal submitted", state.alias, provider))
     if wait:
         return wait_for_certificate(
             ctx,
@@ -961,6 +933,112 @@ def renew(
             stop_event=stop_event,
         )
     return state
+
+
+@dataclass
+class RenewalCheck:
+    """Whether a certificate can be renewed, and with which contact e-mail."""
+
+    state: RequestState
+    contact: str = ""
+    record_email: str = ""  # the contact the CA holds ('' if unknown or not asked)
+    asked: bool = False  # the CA was consulted
+    problem: str = ""  # why the renewal would be refused ('' if it would not)
+
+    @property
+    def ok(self) -> bool:
+        return not self.problem
+
+
+def check_renewal(
+    ctx: AppContext,
+    state: "RequestState | str",
+    *,
+    email: str = "",
+    progress: Progress = noop,
+    stop_event=None,
+) -> RenewalCheck:
+    """Refresh the CA's record of the certificate and apply the CA's renewal rules.
+
+    The contact defaults to the e-mail the CA holds for the certificate (as
+    CertWizard does), then the one recorded locally, then the configured one.
+    Network errors propagate; refusals are returned in ``problem``.
+    """
+    if isinstance(state, str):
+        state = ctx.store.get(state)
+    if state.renewal:
+        return RenewalCheck(state, problem="a renewal is already in progress")
+    try:
+        certificate = ctx.store.load_certificate(state)
+    except NotFound:
+        return RenewalCheck(state, problem="there is no certificate to renew")
+    provider = ctx.provider_for(state)
+    asked = provider.refresh_record(state, certificate, progress=progress, stop_event=stop_event)
+    if asked:
+        ctx.store.save(state)
+    record_email = state.server.email if asked else ""
+    contact = (email or record_email or state.email or ctx.config.identity.email).strip()
+    check = RenewalCheck(state, contact=contact, record_email=record_email, asked=asked)
+    check.problem = provider.renewal_problem(state, certificate, contact)
+    if not check.problem:
+        if not contact:
+            check.problem = "no contact e-mail is known for this certificate; give one"
+        else:
+            try:
+                validate_email(contact)
+            except PyCertError as exc:
+                check.problem = str(exc)
+    return check
+
+
+def describe_record(state: RequestState) -> str:
+    """One line for the CA's record of an issued certificate."""
+    server = state.server
+    if not server.cert_id and not server.status:
+        return "the CA has no record of this certificate"
+    parts = [f"CA status {server.status or 'unknown'}"]
+    if server.email:
+        parts.append(f"contact {server.email}")
+    if server.cert_id:
+        parts.append(f"certificate id {server.cert_id}")
+    return ", ".join(parts)
+
+
+def refresh_records(
+    ctx: AppContext,
+    *,
+    aliases: "set[str] | None" = None,
+    only_missing: bool = False,
+    progress: Progress = noop,
+    stop_event=None,
+) -> "list[tuple[RequestState, str]]":
+    """Ask the CA for its record (status, contact) of issued certificates.
+
+    Imported certificates (from a Java keystore or a PKCS#12 file) start
+    without one. ``only_missing`` skips certificates that were checked before.
+    Errors are reported per certificate, never raised.
+    """
+    results: "list[tuple[RequestState, str]]" = []
+    for state in ctx.store.list():
+        if aliases is not None and state.alias not in aliases:
+            continue
+        if state.renewal or state.status in PENDING_STATUSES or not state.cert.sha256:
+            continue
+        if only_missing and state.server.last_checked:
+            continue
+        if stop_event is not None and stop_event.is_set():
+            break
+        try:
+            certificate = ctx.store.load_certificate(state)
+            if not ctx.provider_for(state).refresh_record(state, certificate, stop_event=stop_event):
+                continue
+            ctx.store.save(state)
+            message = describe_record(state)
+        except PyCertError as exc:
+            message = f"error: {exc}"
+        results.append((state, message))
+        progress(f"{state.alias}: {message}")
+    return results
 
 
 def _san_values(certificate: x509.Certificate, kind) -> list:
@@ -987,7 +1065,15 @@ def revoke(
             f"'{state.alias}' has a renewal in flight; finish it (pycert wait) or remove the "
             "pending files before revoking, so the certificate id and key cannot get mixed up"
         )
-    if not state.server.cert_id:
+    provider = ctx.provider_for(state)
+    if not provider.capabilities.revoke:
+        raise PyCertError(f"{provider.display_name} does not support revocation through pyCertWiz")
+    if reason not in provider.capabilities.revocation_reasons:
+        raise PyCertError(
+            f"invalid revocation reason {reason!r}; choose one of: "
+            + ", ".join(provider.capabilities.revocation_reasons)
+        )
+    if provider.capabilities.revoke_needs_id and not state.server.cert_id:
         progress("Looking up the certificate id...")
         outcome = poll_once(ctx, state, progress=progress, stop_event=stop_event)
         state = outcome.state
@@ -997,8 +1083,9 @@ def revoke(
     key = ctx.store.load_key(state, ctx.key_passphrase())
     if not certs.certificate_matches_key(certificate, key):
         raise PyCertError("the stored private key does not match the certificate to revoke")
-    progress(f"Requesting revocation of certificate {state.server.cert_id} ({reason})...")
-    submission = ctx.client().revoke(state.server.cert_id, reason, certificate, key)
+    submission = provider.revoke(
+        state, reason, certificate=certificate, key=key, progress=progress, stop_event=stop_event
+    )
     if not submission.success:
         raise CAError(f"{submission.message}: {submission.detail}".strip(": "), status=submission.status)
     state.set_status(STATUS_REVOKED, f"revoked by this client (reason: {reason})")
@@ -1012,46 +1099,9 @@ def revoke(
 # ---------------------------------------------------------------------------
 
 
-def import_p12(
-    ctx: AppContext,
-    path: Path,
-    password: str,
-    *,
-    alias: str = "",
-    progress: Progress = noop,
-    require_verified_chain: bool = True,
-) -> RequestState:
-    """Import an existing PKCS#12 bundle so it can be renewed/exported by pyCert."""
-    progress(f"Reading {path} ...")
-    bundle: P12Bundle = p12_module.read_pkcs12(Path(path), password)
-    weak_key_warning = certs.key_strength_warning(bundle.key.public_key())
-    if weak_key_warning:
-        progress("warning: " + weak_key_warning)
-    cn = certs.common_name(bundle.cert.subject)
-    cert_type = "host" if "." in cn and " " not in cn else "user"
-    name = alias or cn
-    if ctx.store.exists(name):
-        raise PyCertError(f"a certificate request called '{name}' already exists")
-    result = ctx.build_chain(bundle.cert)
-    for problem in result.problems:
-        progress(f"chain problem: {problem}")
-    if not result.trusted and require_verified_chain:
-        raise ChainError(
-            "the imported certificate's chain did not validate: "
-            + "; ".join(result.problems or ["no trust anchor reached"])
-            + "\nUse --allow-unverified-chain to import anyway."
-        )
-
-    state = ctx.store.new_state(alias=name, type=cert_type, cn=cn, email="")
-    state.subject = bundle.cert.subject.rfc4514_string()
-    state.key_algorithm = certs.key_description(bundle.key.public_key())
-    state.key_bits = getattr(bundle.key, "key_size", 0) or 0
-    state.spki_b64 = certs.spki_b64(bundle.key.public_key())
-    state.public_key_sha256 = certs.key_fingerprint(bundle.key.public_key())
-    ctx.store.save_key(state, bundle.key, ctx.key_passphrase())
-    # Save the CSR slot empty; imported certificates have no CSR.
-    description = certs.describe_certificate(bundle.cert)
-    state.cert = CertInfo(
+def cert_info(description: "certs.CertDescription", result: chain.ChainResult) -> CertInfo:
+    """The stored summary of an issued certificate and its verified chain."""
+    return CertInfo(
         subject=description.subject,
         issuer=description.issuer,
         serial=description.serial,
@@ -1063,6 +1113,51 @@ def import_p12(
         chain_sha256=[certs.fingerprint(c) for c in result.chain],
         verified=result.trusted,
     )
+
+
+def import_p12(
+    ctx: AppContext,
+    path: Path,
+    password: str,
+    *,
+    alias: str = "",
+    progress: Progress = noop,
+    require_verified_chain: bool = True,
+    ca: str = "",
+) -> RequestState:
+    """Import an existing PKCS#12 bundle so it can be renewed/exported by pyCertWiz."""
+    profile = ctx.profile(ca)
+    progress(f"Reading {path} ...")
+    bundle: P12Bundle = p12_module.read_pkcs12(Path(path), password)
+    weak_key_warning = certs.key_strength_warning(bundle.key.public_key())
+    if weak_key_warning:
+        progress("warning: " + weak_key_warning)
+    cn = certs.common_name(bundle.cert.subject)
+    cert_type = "host" if "." in cn and " " not in cn else "user"
+    name = alias or cn
+    if ctx.store.exists(name):
+        raise PyCertError(f"a certificate request called '{name}' already exists")
+    result = ctx.build_chain(bundle.cert, profile.name)
+    for problem in result.problems:
+        progress(f"chain problem: {problem}")
+    if not result.trusted and require_verified_chain:
+        raise ChainError(
+            "the imported certificate's chain did not validate: "
+            + "; ".join(result.problems or ["no trust anchor reached"])
+            + "\nUse --allow-unverified-chain to import anyway."
+        )
+
+    state = ctx.store.new_state(alias=name, type=cert_type, cn=cn, email="")
+    state.ca = profile.name
+    state.subject = bundle.cert.subject.rfc4514_string()
+    state.key_algorithm = certs.key_description(bundle.key.public_key())
+    state.key_bits = getattr(bundle.key, "key_size", 0) or 0
+    state.spki_b64 = certs.spki_b64(bundle.key.public_key())
+    state.public_key_sha256 = certs.key_fingerprint(bundle.key.public_key())
+    ctx.store.save_key(state, bundle.key, ctx.key_passphrase())
+    # Save the CSR slot empty; imported certificates have no CSR.
+    description = certs.describe_certificate(bundle.cert)
+    state.cert = cert_info(description, result)
     state.server.start_date = not_valid_before(bundle.cert).strftime("%d/%m/%Y")
     state.server.end_date = not_valid_after(bundle.cert).strftime("%d/%m/%Y")
     ctx.store.save_certificate(state, bundle.cert, result.issuers)
@@ -1143,7 +1238,7 @@ def verify(
     days = (not_valid_after(certificate) - now).days
     if days <= 30:
         report.warn(f"the certificate expires in {days} days; plan a renewal")
-    result = ctx.build_chain(certificate)
+    result = ctx.build_chain(certificate, state.ca)
     report.chain = result
     report.add(
         "chain validates",
@@ -1183,10 +1278,21 @@ def install_pem(
     alias: str,
     directory: Path,
     *,
-    encrypt_key: bool = False,
     include_chain: bool = False,
+    password: "str | None" = None,
+    no_passphrase: bool = False,
     progress: Progress = noop,
 ) -> "dict[str, Path]":
+    """Write usercert.pem and userkey.pem (the GSI/Globus layout).
+
+    The key is encrypted with *password*, a new passphrase the user chose for
+    it (never the saved secret). Only when the caller has obtained the user's
+    explicit confirmation may *no_passphrase* leave this single key file
+    unprotected.
+    """
+    from .exporter import FORMATS, check_passphrase
+
+    check_passphrase(ctx, FORMATS["key"], password, no_passphrase)
     state = ctx.store.get(alias)
     certificate = ctx.store.load_certificate(state)
     key = ctx.store.load_key(state, ctx.key_passphrase())
@@ -1197,15 +1303,155 @@ def install_pem(
     if include_chain:
         cert_text += "".join(certs.cert_pem(c) for c in ctx.store.load_chain(state))
     atomic_write(cert_path, cert_text, mode=0o644)
-    key_password = ctx.p12_passphrase() if encrypt_key else None
-    atomic_write(key_path, certs.key_pem(key, key_password), mode=0o400)
+    _write_single_key(ctx, key_path, key, password=password, no_passphrase=no_passphrase, progress=progress)
     progress(f"Wrote {cert_path} (mode 0644) and {key_path} (mode 0400).")
-    if not encrypt_key:
-        progress(
-            "The private key file is unencrypted (traditional GSI layout). Its permissions are "
-            "0400; keep the directory private."
-        )
     return {"cert": cert_path, "key": key_path}
+
+
+def _write_single_key(ctx, path: Path, key, *, password: "str | None", no_passphrase: bool, progress: Progress) -> None:
+    if no_passphrase:
+        atomic_write(path, certs.unprotected_key_pem(key, confirmed=True), mode=0o400)
+        progress(f"warning: {path} has NO passphrase, as you confirmed; anyone who can read it holds the key")
+        return
+    atomic_write(path, certs.key_pem(key, password), mode=0o400)
+    progress(f"{path.name} is protected with the new passphrase you chose; pyCertWiz does not keep it.")
+
+
+def export_certificate(
+    ctx: AppContext,
+    alias: str,
+    destination: "Path | str",
+    *,
+    format: str = "p12",
+    encryption: str = "",
+    password: "str | None" = None,
+    no_passphrase: bool = False,
+    include_chain: bool = True,
+    overwrite: bool = False,
+    progress: Progress = noop,
+):
+    """Export a stored certificate in *format* (see :mod:`pycert.exporter`).
+
+    Anything with a private key needs a new passphrase chosen for this export.
+    """
+    from .exporter import export_material
+
+    state = ctx.store.get(alias)
+    certificate = ctx.store.load_certificate(state)
+    chain_certs = ctx.store.load_chain(state) or ctx.build_chain(certificate, state.ca).issuers
+    return export_material(
+        alias=state.alias,
+        certificate=certificate,
+        chain=chain_certs,
+        load_key=lambda: ctx.store.load_key(state, ctx.key_passphrase()),
+        fmt=format,
+        destination=destination,
+        ctx=ctx,
+        encryption=encryption,
+        password=password,
+        no_passphrase=no_passphrase,
+        include_chain=include_chain,
+        overwrite=overwrite,
+        progress=progress,
+    )
+
+
+def export_pem(
+    ctx: AppContext,
+    alias: str,
+    directory: Path,
+    *,
+    include_chain: bool = True,
+    password: "str | None" = None,
+    no_passphrase: bool = False,
+    overwrite: bool = True,
+    progress: Progress = noop,
+) -> "dict[str, Path]":
+    """Save one certificate and its private key as PEM files: ``<name>.pem`` and ``<name>.key``.
+
+    The key is encrypted with *password*, a new passphrase chosen for this
+    export, unless the user explicitly confirmed *no_passphrase* for this
+    individual key file.
+    """
+    result = export_certificate(
+        ctx,
+        alias,
+        directory,
+        format="pem-files",
+        password=password,
+        no_passphrase=no_passphrase,
+        include_chain=include_chain,
+        overwrite=overwrite,
+        progress=progress,
+    )
+    return result.files
+
+
+# ---------------------------------------------------------------------------
+# Renaming
+# ---------------------------------------------------------------------------
+
+MAX_ALIAS_LENGTH = 200
+
+
+def validate_alias(name: str) -> str:
+    """A usable certificate name: not empty, printable, of reasonable length."""
+    alias = name.strip()
+    if not alias:
+        raise PyCertError("the name cannot be empty")
+    if len(alias) > MAX_ALIAS_LENGTH:
+        raise PyCertError(f"the name is longer than {MAX_ALIAS_LENGTH} characters")
+    if any(not ch.isprintable() for ch in alias):
+        raise PyCertError("the name cannot contain control characters")
+    return alias
+
+
+def rename_certificate(
+    ctx: AppContext,
+    alias: str,
+    new_alias: str,
+    *,
+    keystore_entry: bool = False,
+    progress: Progress = noop,
+) -> RequestState:
+    """Give a certificate a new name in pyCertWiz (and, optionally, in its Java keystore).
+
+    The files stay where they are; references from other certificates (the
+    authenticating certificate of host requests) follow the new name. With
+    *keystore_entry*, the linked Java keystore entry is renamed too, so
+    CertWizard shows the same name; that needs the keystore passphrase.
+    """
+    state = ctx.store.get(alias)
+    old = state.alias
+    new = validate_alias(new_alias)
+    if new == old:
+        return state
+    clash = [s for s in ctx.store.list() if s.slug != state.slug and s.alias.lower() == new.lower()]
+    if clash:
+        raise PyCertError(f"another certificate is already called '{clash[0].alias}'")
+    if keystore_entry:
+        if not state.keystore.get("name"):
+            raise PyCertError(f"'{old}' is not linked to a Java keystore")
+        from . import keystore as keystore_module
+
+        link = ctx.config.keystore(state.keystore["name"])
+        if not link.write_back:
+            raise PyCertError(f"keystore '{link.name}' is linked read-only; its entries are not renamed")
+        java_alias = state.keystore.get("alias") or old
+        password = keystore_module.keystore_password(ctx, link)
+        with keystore_module.open_keystore(link.path, password) as keystore:
+            keystore.rename(java_alias, new)
+        state.keystore = {**state.keystore, "alias": new}
+        progress(f"Renamed entry '{java_alias}' to '{new}' in Java keystore '{link.name}'")
+    state.alias = new
+    state.add_history(state.status, f"renamed from '{old}'")
+    ctx.store.save(state)
+    for other in ctx.store.list():
+        if other.slug != state.slug and other.auth_alias == old:
+            other.auth_alias = new
+            ctx.store.save(other)
+    progress(f"Renamed '{old}' to '{new}'")
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -1315,16 +1561,26 @@ def renew_due(
     dry_run: bool = False,
     progress: Progress = noop,
     on_pin=None,
+    ca: str = "",
+    include_manual: bool = False,
     **renew_options,
 ):
     """Renew every stored certificate expiring within *days*.
+
+    Certificates with ``auto_renew`` switched off are skipped unless
+    *include_manual* is true; *ca* limits the run to one CA profile.
 
     Returns a list of ``(state, error)`` pairs; ``error`` is None on success.
     ``dry_run`` only selects and reports what would be renewed.
     """
     due = []
+    primary = ctx.config.primary_profile.name
     for state in ctx.store.list():
         if state.status == STATUS_REVOKED or state.renewal:
+            continue
+        if not state.auto_renew and not include_manual:
+            continue
+        if ca and (state.ca or primary) != ca:
             continue
         if not state.cert.not_after or not state.active_spki_b64:
             continue
@@ -1368,8 +1624,11 @@ def refresh_all(ctx: AppContext, *, progress: Progress = noop) -> "list[tuple[Re
     return results
 
 
-def list_ras(ctx: AppContext) -> "list[RA]":
-    return ctx.client().info().ras
+def list_ras(ctx: AppContext, ca: str = "") -> "list[RA]":
+    provider = ctx.provider(ca)
+    if not provider.capabilities.ra:
+        raise PyCertError(f"{provider.display_name} does not use Registration Authorities")
+    return provider.ras()
 
 
 def expiry_warning(state: RequestState, days: int = 30) -> "str | None":
@@ -1384,4 +1643,4 @@ def expiry_warning(state: RequestState, days: int = 30) -> "str | None":
 
 
 def describe_state(state: RequestState) -> dict:
-    return merge_dicts(state.to_dict(), {"days_remaining": state.days_remaining})
+    return {**state.to_dict(), "days_remaining": state.days_remaining}

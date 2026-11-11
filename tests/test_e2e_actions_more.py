@@ -17,10 +17,11 @@ SCENARIOS = [
     ("status-refresh", ["status", "{alias}", "--refresh"], "issued"),
     ("show", ["show", "{alias}"], "issued"),
     ("verify", ["verify", "{alias}"], "issued"),
-    ("export", ["export", "{alias}"], "issued"),
+    ("export", ["export", "{alias}", "--stored"], "issued"),
+    ("export-p12", ["export", "{alias}", "--out", "{tmp}/x.p12", "--password-file", "{tmp}/pw"], "issued"),
     ("download", ["download", "{alias}"], "issued"),
     ("wait", ["wait", "{alias}", "--interval", "0.1", "--timeout", "5"], "issued"),
-    ("install", ["install", "{alias}", "--dir", "{tmp}/globus"], "issued"),
+    ("install", ["install", "{alias}", "--dir", "{tmp}/globus", "--password-file", "{tmp}/pw"], "issued"),
     ("delete", ["delete", "{alias}", "--yes"], "issued"),
     ("renew", ["renew", "{alias}", "--yes", "--pin", "1234567890AB"], "issued"),
     ("revoke", ["revoke", "{alias}", "--yes"], "issued"),
@@ -50,6 +51,7 @@ def setup(e2e, kind, tmp):
 @pytest.mark.parametrize("name,args,kind", SCENARIOS)
 def test_cli_action_scenario(e2e, tmp_path, json_mode, name, args, kind):
     alias = setup(e2e, kind, tmp_path)
+    (tmp_path / "pw").write_text("scenario passphrase\n")
     argv = [part.format(alias=alias, tmp=str(tmp_path)) for part in args]
     result = e2e.run(*argv, "--json") if json_mode else e2e.run(*argv)
     assert result.code == 0, (name, result.out, result.err)

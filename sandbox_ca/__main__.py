@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=".sandbox-ca",
         help="directory holding the persistent CA and sandbox metadata",
     )
-    parser.add_argument("--motd", default="pyCert sandbox CA: certificates issued here are for testing only.")
+    parser.add_argument("--motd", default="pyCertWiz sandbox CA: certificates issued here are for testing only.")
     parser.add_argument(
         "--sign-after-polls",
         type=int,
@@ -146,7 +146,7 @@ def main(argv=None) -> int:
             return 1
 
     info = ca.info()
-    print("pyCert sandbox CA")
+    print("pyCertWiz sandbox CA")
     print("  URL:              %s" % info["url"])
     print("  data directory:   %s" % info["data_dir"])
     print("  root SHA-256:     %s" % info["root_sha256"])

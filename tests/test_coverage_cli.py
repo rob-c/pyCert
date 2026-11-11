@@ -201,10 +201,12 @@ def test_cmd_secret_interactive_paths(e2e, monkeypatch, capsys):
     capsys.readouterr()
 
 
-def test_cmd_gui_import_error(config, monkeypatch):
+def test_cmd_gui_unavailable(config, monkeypatch):
+    import pycert.gui as gui_module
+
     args = argparse.Namespace(config=config.path, json=False, quiet=False)
-    monkeypatch.setattr("builtins.__import__", lambda name, *a, **k: (_ for _ in ()).throw(ImportError("no tk")))
-    with pytest.raises(PyCertError):
+    monkeypatch.setattr(gui_module, "gui_available", lambda: "the graphical interface needs PySide6")
+    with pytest.raises(PyCertError, match="PySide6"):
         cli.cmd_gui(args)
 
 
@@ -301,6 +303,7 @@ def test_cmd_secret_interactive_failures(e2e, monkeypatch, capsys):
 def test_cmd_gui_success_and_debug_error(config, monkeypatch):
     import pycert.gui as gui_module
 
+    monkeypatch.setattr(gui_module, "gui_available", lambda: None)
     monkeypatch.setattr(gui_module, "run_gui", lambda config_path=None: 0)
     args = argparse.Namespace(config=config.path, json=False, quiet=False)
     assert cli.cmd_gui(args) == 0

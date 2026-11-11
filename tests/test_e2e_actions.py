@@ -53,7 +53,7 @@ def test_request_wait_download_export_verify(e2e):
     verified = e2e.run_json("verify", alias)
     assert verified.code == 0
     assert verified.json["ok"] is True
-    exported = e2e.run_json("export", alias)
+    exported = e2e.run_json("export", alias, "--stored")  # pyCertWiz's own copy (saved secret)
     assert exported.code == 0
     assert Path(exported.json["p12"]).is_file()
 
@@ -92,9 +92,11 @@ def test_export_and_install(e2e, tmp_path):
     e2e.ca.sign_after_polls = 0
     alias = e2e.request_user("install user", wait=True).json["alias"]
     target = tmp_path / "e2e.p12"
-    exported = e2e.run_json("export", alias, "--out", str(target))
+    (tmp_path / "pw").write_text("a new passphrase\n")
+    exported = e2e.run_json("export", alias, "--out", str(target), "--password-file", str(tmp_path / "pw"))
     assert exported.code == 0 and target.is_file()
-    install = e2e.run_json("install", alias, "--dir", str(tmp_path / "globus"))
+    assert exported.json["files"]["p12"] == str(target)
+    install = e2e.run_json("install", alias, "--dir", str(tmp_path / "globus"), "--password-file", str(tmp_path / "pw"))
     assert install.code == 0
     assert Path(install.json["cert"]).is_file()
     assert Path(install.json["key"]).is_file()

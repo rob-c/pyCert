@@ -17,11 +17,11 @@ import json
 import os
 import re
 import secrets
-import socket
 import ssl
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -34,7 +34,6 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from cryptography.x509.oid import NameOID
 
-from pycert.compat import csr_signature_valid, dataclass, field
 from pycert.errors import PyCertError
 
 from .mock_ca import ThreadingHTTPServer, _pem, _spki_b64
@@ -819,7 +818,7 @@ class ACMEServer:
         try:
             with opener.open(Request(url, headers={"User-Agent": "pycert-acme-sandbox"}), timeout=5) as response:
                 body = response.read(8192).decode("utf-8", "replace").strip()
-        except (HTTPError, URLError, OSError, socket.timeout) as exc:
+        except (TimeoutError, HTTPError, URLError, OSError) as exc:
             return False, "http-01 validation failed for %s: %s" % (url, exc)
         expected = self._key_authorization(challenge)
         if body != expected:
@@ -875,7 +874,7 @@ class ACMEServer:
             csr = x509.load_der_x509_csr(b64d(csr_b64))
         except (ValueError, TypeError) as exc:
             raise ACMEProblem("badCSR", "could not parse CSR: %s" % exc)
-        if not csr_signature_valid(csr):
+        if not csr.is_signature_valid:
             raise ACMEProblem("badCSR", "CSR signature is invalid")
         domains = self._csr_domains(csr)
         requested = [item["value"] for item in order.identifiers]

@@ -7,6 +7,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
+from openssl_support import sha1_env
 
 from pycert import bundled, certs, chain
 from pycert.errors import ChainError
@@ -172,6 +173,7 @@ def test_sha1_chain_is_refused_unless_allowed(tmp_path):
         ],
         check=True,
         capture_output=True,
+        env=sha1_env(),
     )
     subprocess.run(
         [
@@ -190,8 +192,9 @@ def test_sha1_chain_is_refused_unless_allowed(tmp_path):
         ],
         check=True,
         capture_output=True,
+        env=sha1_env(),
     )
-    subprocess.run(
+    signed = subprocess.run(
         [
             openssl,
             "x509",
@@ -209,9 +212,11 @@ def test_sha1_chain_is_refused_unless_allowed(tmp_path):
             "-out",
             str(leaf_path),
         ],
-        check=True,
         capture_output=True,
+        env=sha1_env(),
     )
+    if signed.returncode != 0:  # pragma: no cover - a crypto policy that cannot be relaxed
+        pytest.skip("this OpenSSL refuses to create SHA-1 signatures: " + signed.stderr.decode(errors="replace")[:200])
     root = certs.load_certificate(root_path.read_bytes())
     leaf = certs.load_certificate(leaf_path.read_bytes())
     strict = chain.build_chain(leaf, anchors=[root], extra=[root])

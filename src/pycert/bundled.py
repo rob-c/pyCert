@@ -1,4 +1,4 @@
-"""The CA certificates shipped with pyCert.
+"""The CA certificates shipped with pyCertWiz.
 
 These are the same four UK e-Science CA certificates that CertWizard bundled.
 Each one is pinned by the SHA-256 fingerprint of its DER encoding; a resource
@@ -15,7 +15,6 @@ from pathlib import Path
 from cryptography import x509
 
 from . import certs
-from .compat import package_data_dir
 from .errors import ConfigError
 
 #: file name -> expected SHA-256 fingerprint of the certificate (lower-case hex)
@@ -33,7 +32,7 @@ PINNED: "dict[str, str]" = {
 
 def data_dir() -> Path:
     """Filesystem path of the bundled certificate directory (for copying)."""
-    return Path(package_data_dir())
+    return Path(__file__).resolve().parent / "data" / "ca"
 
 
 def path_for(name: str) -> Path:

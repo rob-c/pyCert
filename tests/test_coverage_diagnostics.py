@@ -103,7 +103,7 @@ def test_doctor_network_failures(ctx, config, monkeypatch):
 
 
 def test_selftest_failure_paths(monkeypatch):
-    monkeypatch.setattr("pycert.toml.loads", lambda _doc: (_ for _ in ()).throw(RuntimeError("toml")))
+    monkeypatch.setattr("pycert.config.toml_loads", lambda _doc: (_ for _ in ()).throw(RuntimeError("toml")))
     monkeypatch.setattr("pycert.csr.build_csr", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("csr")))
     monkeypatch.setattr("pycert.p12.write_pkcs12", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("p12")))
     monkeypatch.setattr("pycert.bundled.certificates", lambda: (_ for _ in ()).throw(RuntimeError("bundle")))
@@ -115,11 +115,10 @@ def test_selftest_failure_paths(monkeypatch):
     assert names["bundled CA chain"] == diagnostics.FAIL
 
 
-def test_doctor_py36_no_anchors_data_dir_and_secret_symlink(ctx, config, monkeypatch, tmp_path):
-    monkeypatch.setattr(diagnostics.sys, "version_info", (3, 6, 0, "final", 0))
+def test_doctor_no_anchors_data_dir_and_secret_symlink(ctx, config, monkeypatch, tmp_path):
     config._bundle = SimpleNamespace(certificates=[], anchors=[], sources=[])
     results = diagnostics.run_doctor(ctx, offline=True)
-    assert _names(results)["Python 3.6 support"] == diagnostics.WARN
+    assert "Python 3.6 support" not in _names(results)
     assert _names(results)["trust anchors"] == diagnostics.FAIL
     # Data directory stat failure.
     monkeypatch.setattr(type(config), "data_dir", property(lambda self: tmp_path / "missing"))
@@ -157,7 +156,7 @@ def test_doctor_tls_chain_failure(ctx, monkeypatch):
 def test_doctor_saved_secret_and_untrusted_tls(ctx, monkeypatch):
     monkeypatch.setattr(ctx.secrets, "exists", lambda _account: True)
     monkeypatch.setattr(
-        ctx, "build_chain", lambda cert: SimpleNamespace(trusted=False, problems=["bad"], chain=[])
+        ctx, "build_chain", lambda cert, *_a, **_k: SimpleNamespace(trusted=False, problems=["bad"], chain=[])
     )
     client = SimpleNamespace(
         last_error="", ping=lambda: True, info=lambda: SimpleNamespace(ras=[]),

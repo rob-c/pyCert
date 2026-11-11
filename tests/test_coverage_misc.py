@@ -10,8 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from pycert import _dataclasses, asn1, bundled, csr, p12, store, util
-from pycert.compat import field
+from pycert import asn1, bundled, csr, p12, store, util
 from pycert.errors import ConfigError, CryptoError, NotFound, PyCertError
 
 
@@ -22,37 +21,6 @@ def test_asn1_error_paths():
         asn1.encode_length(1 << 40)
     with pytest.raises(TypeError):
         asn1.integer("not-an-int")
-
-
-def test_dataclasses_fallback_error_paths():
-    assert repr(_dataclasses._Missing()) == "<missing>"
-    with pytest.raises(ValueError):
-        field(default=1, default_factory=list)
-    with pytest.raises(ValueError):
-        _dataclasses.Field(default=[])
-    with pytest.raises(ValueError):
-        _dataclasses.Field(default_factory=1)
-
-    @_dataclasses.dataclass
-    class Base:
-        x: int = 1
-
-    @_dataclasses.dataclass
-    class Child(Base):
-        x: int = 2
-
-    assert Child().x == 2
-    assert [name for name, _ in _dataclasses._collect_fields(Child)] == ["x"]
-
-    @_dataclasses.dataclass(frozen=True)
-    class Frozen:
-        x: int
-
-    value = Frozen(1)
-    with pytest.raises(_dataclasses.FrozenInstanceError):
-        value.x = 2
-    with pytest.raises(_dataclasses.FrozenInstanceError):
-        del value.x
 
 
 def test_bundled_error_paths(tmp_path, monkeypatch):
@@ -242,31 +210,6 @@ def _other_cert(key):
     )
 
 
-def test_dataclasses_multiple_inheritance_and_frozen_mutation():
-    @_dataclasses.dataclass
-    class A:
-        x: int = 1
-
-    @_dataclasses.dataclass
-    class B:
-        x: int = 2
-
-    @_dataclasses.dataclass
-    class C(A, B):
-        pass
-
-    assert C().x in (1, 2)
-
-    @_dataclasses.dataclass(frozen=True)
-    class F:
-        x: int = 1
-
-    value = F()
-    object.__setattr__(value, "_pycert_frozen", False)
-    value.x = 3
-    del value.x
-
-
 def test_ensure_dir_file_exists_error(tmp_path):
     path = tmp_path / "file"
     path.write_text("x")
@@ -280,7 +223,7 @@ def test_entrypoint_module():
 
     result = subprocess.run([sys.executable, "-m", "pycert", "--version"], capture_output=True, text=True)
     assert result.returncode == 0
-    assert "pyCert" in result.stdout
+    assert "pyCertWiz" in result.stdout
 
 
 def test_p12_verification_failure_paths(tmp_path, ctx, issued, monkeypatch):
@@ -456,23 +399,6 @@ def test_chain_key_ids_allow_missing_authority_key_id():
     child = SimpleNamespace(extensions=Extensions())
     issuer = SimpleNamespace(extensions=Extensions())
     assert ChainBuilder._key_ids_consistent(child, issuer)
-
-
-def test_toml_crlf_and_table_conflicts():
-    from pycert import toml
-
-    with pytest.raises(toml.TOMLDecodeError):
-        toml.loads("a = [1]\n[[a]]\n")
-    with pytest.raises(toml.TOMLDecodeError):
-        toml.loads("a = [1]\n[a.b]\n")
-    with pytest.raises(toml.TOMLDecodeError):
-        toml.loads("a = { b = 1, b.c = 2 }\n")
-    assert toml.loads('a = """x\r\ny"""\n')["a"] == "x\ny"
-    assert toml.loads('a = """\r\nx"""\n')["a"] == "x"
-    assert toml.loads('a = """x \\\t\n y"""\n')["a"] == "x y"
-    assert toml.loads('a = """x \\\r\n y"""\n')["a"] == "x y"
-    assert toml.loads("a = '''x\r\ny'''\n")["a"] == "x\ny"
-    assert toml.loads("a = '''\r\nx'''\n")["a"] == "x"
 
 
 def test_signature_description_falls_back_on_unsupported_hash():

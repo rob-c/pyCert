@@ -12,13 +12,13 @@ produced, with the parts that were dangerous or missing fixed:
 """
 
 import ipaddress
+from dataclasses import dataclass
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID
 
 from . import certs
-from .compat import csr_signature_valid, dataclass
 from .errors import CryptoError
 
 DEFAULT_HASH = "sha256"
@@ -144,7 +144,7 @@ def build_csr(
 
 
 def signature_valid(csr: x509.CertificateSigningRequest) -> bool:
-    return csr_signature_valid(csr)
+    return bool(csr.is_signature_valid)
 
 
 @dataclass

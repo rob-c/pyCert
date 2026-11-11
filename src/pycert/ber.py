@@ -1,7 +1,7 @@
 """Minimal BER/DER reader used for legacy PKCS#12 keystores.
 
 Java's PKCS#12 writer emits BER with indefinite-length constructed objects,
-whereas pyCert's own writer emits DER.  This module only implements the small
+whereas pyCertWiz's own writer emits DER.  This module only implements the small
 subset needed to inspect SafeBags; it is deliberately strict about boundaries
 and nesting depth.
 """

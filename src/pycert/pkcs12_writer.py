@@ -2,7 +2,7 @@
 
 ``cryptography``/OpenSSL can serialise PKCS#12, but older versions (including
 the newest release that supports Python 3.6) choose legacy PBE-SHA1-3DES and a
-SHA-1 MAC.  The container format is simple and well specified, so pyCert builds
+SHA-1 MAC.  The container format is simple and well specified, so pyCertWiz builds
 it itself and uses the library only for the primitives:
 
 * PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC for the key bag and for the
@@ -196,7 +196,7 @@ def encode_pkcs12(
 
     ``legacy=True`` selects PBE-SHA1-3DES and an HMAC-SHA-1 MAC, the
     combination old Java keytool/CertWizard releases understand.  The default
-    remains modern PBES2/AES-256 for pyCert's own bundles.
+    remains modern PBES2/AES-256 for pyCertWiz's own bundles.
     """
     if not password:
         raise ValueError("password required")

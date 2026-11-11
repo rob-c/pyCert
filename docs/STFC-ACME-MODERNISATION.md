@@ -97,7 +97,7 @@ golden wire fixtures.
   against the bundled CA anchors.
 
 All of that is now documented in [`CA_LISTENER.md`](CA_LISTENER.md) and covered
-by the Java/pyCert wire-parity suite.
+by the Java/pyCertWiz wire-parity suite.
 
 ### 1.3 The operational pain
 
@@ -557,17 +557,17 @@ uses a Kubernetes Secret for the account key; EAB credentials should be stored
 in a Secret and rotated. Caddy and Traefik can obtain certificates directly but
 need the endpoint trusted by their container/host trust store.
 
-### 8.4 Existing CertWizard and pyCert users
+### 8.4 Existing CertWizard and pyCertWiz users
 
 Do not switch off the legacy listener on day one. Run both:
 
-- CertWizard/pyCert continue to use `/CSR`, `/CSRs`, `/revoke`;
+- CertWizard/pyCertWiz continue to use `/CSR`, `/CSRs`, `/revoke`;
 - ACME clients use `/acme/*`;
 - both feed the same CA queue and certificate store;
 - issue a compatibility matrix and deprecation date;
 - provide a migration guide with example certbot/nginx commands.
 
-The reference repository already has a Java-vs-pyCert wire-parity suite and a
+The reference repository already has a Java-vs-pyCertWiz wire-parity suite and a
 headless Java `SandboxFlow`; use it to prove that the legacy path remains
 unchanged during the ACME rollout.
 
@@ -645,7 +645,7 @@ unchanged during the ACME rollout.
   - status lookup, download and revocation modes;
   - CA info/MOTD/health/header/response-shape matrices.
 - **Real certbot 5.9.0** obtain and revoke test (`tests/test_acme_certbot.py`).
-- Legacy Java/CertWizard vs pyCert wire-parity tests.
+- Legacy Java/CertWizard vs pyCertWiz wire-parity tests.
 - Python 3.6 compatibility and lint checks.
 
 ### 10.2 Production conformance gates

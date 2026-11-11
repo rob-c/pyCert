@@ -12,14 +12,13 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 
-from pycert import certs, compat
+from pycert import certs
 from pycert import p12 as p12_module
 from pycert.ca import _safe_xml
-from pycert.config import SecretConfig
-from pycert.errors import CryptoError, ProtocolError, PyCertError, SecretError
+from pycert.config import MAX_CONFIG_BYTES, SecretConfig, load_config
+from pycert.errors import ConfigError, CryptoError, ProtocolError, PyCertError, SecretError
 from pycert.secrets_store import SecretStore
 from pycert.store import MAX_STATE_BYTES, Store
-from pycert.toml import MAX_DEPTH, MAX_DOCUMENT_BYTES, TOMLDecodeError, loads
 from pycert.transport import TransportError, _validate_headers, _validate_url
 from pycert.util import atomic_write, ensure_dir, read_private_file
 
@@ -85,24 +84,27 @@ def test_read_private_file_refuses_symlink(tmp_path):
 
 
 # -- parser and format limits -------------------------------------------------
-@pytest.mark.parametrize("size", [MAX_DOCUMENT_BYTES + 1])
-def test_toml_size_limit(size):
-    with pytest.raises(TOMLDecodeError, match="larger"):
-        loads("a = '" + "x" * size + "'\n")
+def test_config_size_limit(tmp_path):
+    path = tmp_path / "pycert.toml"
+    path.write_text("a = '" + "x" * (MAX_CONFIG_BYTES + 1) + "'\n")
+    with pytest.raises(ConfigError, match="larger"):
+        load_config(path)
 
 
-@pytest.mark.parametrize("depth", [MAX_DEPTH + 1, MAX_DEPTH + 10])
-def test_toml_depth_limit(depth):
-    payload = "a = " + "[" * depth + "1" + "]" * depth + "\n"
-    with pytest.raises(TOMLDecodeError, match="deeply"):
-        loads(payload)
+@pytest.mark.parametrize("depth", [1000, 5000])
+def test_config_nesting_is_rejected_cleanly(tmp_path, depth):
+    path = tmp_path / "pycert.toml"
+    path.write_text("a = " + "[" * depth + "1" + "]" * depth + "\n")
+    with pytest.raises(ConfigError):
+        load_config(path)
 
 
-@pytest.mark.parametrize("depth", [MAX_DEPTH + 1])
-def test_toml_inline_depth_limit(depth):
-    payload = "a = " + "{ b = " * depth + "1" + " }" * depth + "\n"
-    with pytest.raises(TOMLDecodeError, match="deeply"):
-        loads(payload)
+@pytest.mark.parametrize("depth", [1000])
+def test_config_inline_table_nesting_is_rejected_cleanly(tmp_path, depth):
+    path = tmp_path / "pycert.toml"
+    path.write_text("a = " + "{ b = " * depth + "1" + " }" * depth + "\n")
+    with pytest.raises(ConfigError):
+        load_config(path)
 
 
 @pytest.mark.parametrize(
@@ -130,12 +132,6 @@ def test_xml_limits(payload):
 def test_certificate_size_limits(payload):
     with pytest.raises(CryptoError):
         certs.load_certificates(payload)
-
-
-def test_pem_block_limit():
-    pem = b"".join(b"-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n" for _ in range(3))
-    with pytest.raises(ValueError, match="more than 2"):
-        compat.split_pem(pem, max_blocks=2)
 
 
 def test_store_state_size_limit(tmp_path):

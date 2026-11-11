@@ -2,7 +2,7 @@
 
 This directory contains two things:
 
-* `mock_ca.py` — the protocol-level CA implementation shared with pyCert's test
+* `mock_ca.py` — the protocol-level CA implementation shared with pyCertWiz's test
   suite (real TLS, PPPK, status transitions, fault injection);
 * `server.py`, `__main__.py` and `admin.py` — a standalone, persistent sandbox
   with a browser admin console and JSON admin API;
@@ -83,6 +83,10 @@ and compatibility checklist are in
 [`docs/CA_LISTENER.md`](../docs/CA_LISTENER.md).
 
 ## Notes
+
+* Certificates are issued with the subject in the production CA's order
+  (C, O, OU, L, CN), whatever order the CSR used, and the PPPK challenge uses
+  the production realm, `UK e-Science CA`.
 
 * The CA hierarchy (and the Java truststore pins) persists in `--data-dir`; the
   TLS leaf is regenerated on each start and is trusted through that hierarchy.

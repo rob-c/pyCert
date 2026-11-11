@@ -18,7 +18,7 @@ Endpoint                Purpose
 ``POST /revoke``        revocation, PPPK-authenticated
 ======================  =====================================================
 
-Security properties pyCert adds on top of the Java client:
+Security properties pyCertWiz adds on top of the Java client:
 
 * TLS is verified against the configured CA chain by default, with optional
   key pinning.  CertWizard shipped a Java truststore whose password was the
@@ -34,6 +34,7 @@ import base64
 import socket
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -41,7 +42,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from . import certs
-from .compat import dataclass, field, not_valid_after
+from .certs import not_valid_after
 from .errors import CAError, CryptoError, NetworkError, ProtocolError
 from .transport import Response, Transport, TransportConfig
 from .util import clamp_text, format_fingerprint
@@ -50,7 +51,7 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_XML_BYTES = 4 * 1024 * 1024
 MAX_XML_DEPTH = 100
 MAX_XML_ELEMENTS = 100000
-USER_AGENT_FALLBACK = "pyCert/1.0"
+USER_AGENT_FALLBACK = "pyCertWiz/1.0"
 
 REVOCATION_REASONS = (
     "unspecified",
@@ -598,7 +599,7 @@ def pppk_response(private_key, realm: str, nonce: str, keyid: str, timestamp_ms:
     exponent modulo the server's modulus, and returns the result in lower-case
     hex.  The server checks the result with the certificate's public key.
 
-    This is what CertWizard implements; pyCert reproduces it exactly so the CA
+    This is what CertWizard implements; pyCertWiz reproduces it exactly so the CA
     keeps working, but the exponentiation is done with Python's big integers
     from the key material supplied by ``cryptography``.
     """

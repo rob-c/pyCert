@@ -1,7 +1,7 @@
 """Certificate, key and name helpers built on ``cryptography``.
 
 All cryptographic operations are delegated to the ``cryptography`` library
-(OpenSSL-backed, audited).  This module adds the policy pyCert needs on top:
+(OpenSSL-backed, audited).  This module adds the policy pyCertWiz needs on top:
 
 * strict loading (a PEM file containing an unexpected object is an error, not a
   surprise);
@@ -14,12 +14,14 @@ All cryptographic operations are delegated to the ``cryptography`` library
 import base64
 import ipaddress
 import warnings
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Sequence, Union
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, rsa
+from cryptography.hazmat.primitives.serialization import pkcs7
 from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509.oid import (
     AuthorityInformationAccessOID,
@@ -27,21 +29,10 @@ from cryptography.x509.oid import (
     NameOID,
 )
 
-from .compat import (
-    dataclass,
-    load_pem_certificates,
-    not_valid_after,
-    not_valid_before,
-    pkcs7_load_der,
-    pkcs7_load_pem,
-    signature_parameters,
-)
 from .errors import CryptoError, UnsupportedAlgorithm
 
-PrivateKey = Union[
-    rsa.RSAPrivateKey, ec.EllipticCurvePrivateKey, ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey
-]
-PublicKey = Union[rsa.RSAPublicKey, ec.EllipticCurvePublicKey, ed25519.Ed25519PublicKey, ed448.Ed448PublicKey]
+PrivateKey = rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey | ed448.Ed448PrivateKey
+PublicKey = rsa.RSAPublicKey | ec.EllipticCurvePublicKey | ed25519.Ed25519PublicKey | ed448.Ed448PublicKey
 
 MAX_CERTIFICATE_BYTES = 1024 * 1024
 MAX_BUNDLE_BYTES = 4 * 1024 * 1024
@@ -54,6 +45,16 @@ HASH_ALGORITHMS = {
     "sha224": hashes.SHA224,
     "sha1": hashes.SHA1,  # verification of historic chains only; never generated
 }
+
+
+def not_valid_before(cert: x509.Certificate) -> datetime:
+    """Start of the validity period as an aware UTC datetime."""
+    return cert.not_valid_before_utc
+
+
+def not_valid_after(cert: x509.Certificate) -> datetime:
+    """End of the validity period as an aware UTC datetime."""
+    return cert.not_valid_after_utc
 
 
 def hash_algorithm(name: str) -> hashes.HashAlgorithm:
@@ -98,7 +99,7 @@ def _quietly(func, *args, **kwargs):
     """Run a parser while ignoring "non-positive serial" deprecation noise.
 
     Some CAs (including the UK e-Science CA) publish certificates with a serial
-    of zero; those are informational, not something pyCert creates, and the
+    of zero; those are informational, not something pyCertWiz creates, and the
     warning would otherwise be printed for every CA listing.
     """
     with warnings.catch_warnings():
@@ -112,7 +113,7 @@ def load_certificate(data: bytes) -> x509.Certificate:
         raise CryptoError("certificate data is larger than 1 MiB")
     try:
         if b"-----BEGIN" in data:
-            certs = _quietly(load_pem_certificates, data)
+            certs = _quietly(x509.load_pem_x509_certificates, data)
             if len(certs) != 1:
                 raise CryptoError(f"expected one certificate, found {len(certs)}")
             return certs[0]
@@ -125,7 +126,7 @@ def load_certificates(data: bytes) -> "list[x509.Certificate]":
     """Load every certificate from PEM/DER, a PEM bundle, or a PKCS#7 bundle.
 
     AIA retrieval commonly returns PKCS#7 DER, and the Java client happily
-    accepted both PEM and DER, so pyCert does too.  Order is preserved and
+    accepted both PEM and DER, so pyCertWiz does too.  Order is preserved and
     duplicates are removed.
     """
     if not data or not data.strip():
@@ -136,8 +137,8 @@ def load_certificates(data: bytes) -> "list[x509.Certificate]":
     if b"-----BEGIN" in data:
         errors = []
         for loader in (
-            load_pem_certificates,
-            pkcs7_load_pem,
+            x509.load_pem_x509_certificates,
+            pkcs7.load_pem_pkcs7_certificates,
         ):
             try:
                 candidates.append(list(_quietly(loader, data)))
@@ -150,7 +151,7 @@ def load_certificates(data: bytes) -> "list[x509.Certificate]":
             candidates.append([_quietly(x509.load_der_x509_certificate, data)])
         except ValueError:
             try:
-                candidates.append(list(_quietly(pkcs7_load_der, data)))
+                candidates.append(list(_quietly(pkcs7.load_der_pkcs7_certificates, data)))
             except Exception as exc:  # noqa: BLE001
                 raise CryptoError(f"could not parse DER certificate/bundle: {exc}") from exc
     result: "list[x509.Certificate]" = []
@@ -180,12 +181,30 @@ def cert_der(cert: x509.Certificate) -> bytes:
     return cert.public_bytes(serialization.Encoding.DER)
 
 
-def key_pem(key: PrivateKey, password: "str | bytes | None" = None) -> str:
+def key_pem(key: PrivateKey, password: "str | bytes | None") -> str:
+    """Encrypted PKCS#8 PEM.  pyCertWiz never writes a private key without a passphrase."""
     if isinstance(password, str):
         password = password.encode()
-    encryption = serialization.BestAvailableEncryption(password) if password else serialization.NoEncryption()
+    if not password:
+        raise CryptoError("refusing to write a private key without passphrase protection")
     return key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, encryption
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.BestAvailableEncryption(password),
+    ).decode("ascii")
+
+
+def unprotected_key_pem(key: PrivateKey, *, confirmed: bool) -> str:
+    """Unencrypted PKCS#8 PEM for a *single* exported key.
+
+    Only for an individual key file the user has explicitly chosen, after a
+    confirmation prompt, to leave without a passphrase.  Bundles (PKCS#12,
+    key+chain PEM, proxies, keystores) and pyCertWiz's own store never use it.
+    """
+    if confirmed is not True:
+        raise CryptoError("writing a private key without a passphrase needs the user's explicit confirmation")
+    return key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
     ).decode("ascii")
 
 
@@ -265,9 +284,7 @@ def signature_description(cert: x509.Certificate) -> str:
 
 
 def name_to_string(name: x509.Name) -> str:
-    from .compat import name_to_string as _name_to_string
-
-    return _name_to_string(name)
+    return name.rfc4514_string()
 
 
 def _san_entries(cert: x509.Certificate) -> "list[str]":
@@ -475,7 +492,7 @@ def verify_certificate_signature(cert: x509.Certificate, issuer: x509.Certificat
             # generic signature helper for one breaks on older cryptography.
             parameters = None
         else:
-            parameters = signature_parameters(cert)
+            parameters = cert.signature_algorithm_parameters
     except (UnsupportedAlgorithm, ValueError) as exc:  # pragma: no cover - exotic algorithms
         raise CryptoError(f"unsupported signature algorithm: {signature_description(cert)}") from exc
     try:
@@ -523,7 +540,7 @@ def basic_constraints_ca(cert: x509.Certificate) -> "bool | None":
 def has_name_constraints_violation(cert: x509.Certificate, issuer: x509.Certificate) -> "list[str]":
     """Very small NameConstraints check for DNS SANs (defence in depth).
 
-    pyCert only ever consumes certificates from the configured CA, so this is a
+    pyCertWiz only ever consumes certificates from the configured CA, so this is a
     sanity check rather than a general-purpose path validator.  Unsupported
     constraint types are ignored on purpose.
     """
@@ -620,6 +637,22 @@ def name_attribute(name: x509.Name, oid: x509.ObjectIdentifier) -> "str | None":
         if attribute.oid == oid:
             return attribute.value
     return None
+
+
+def certificate_kind(certificate: x509.Certificate, cn: str = "") -> str:
+    """'host' or 'user', from the certificate itself (as the CA issues them).
+
+    Host certificates name a machine: they carry DNS names, or their common
+    name is a host name. Anything else identifies a person.
+    """
+    try:
+        san = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        if san.get_values_for_type(x509.DNSName):
+            return "host"
+    except x509.ExtensionNotFound:
+        pass
+    cn = (cn or common_name(certificate.subject)).strip()
+    return "host" if "." in cn and " " not in cn else "user"
 
 
 def common_name(name: x509.Name) -> str:

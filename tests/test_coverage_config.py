@@ -78,7 +78,7 @@ def test_load_config_errors_and_warnings(config, tmp_path, monkeypatch):
     with pytest.raises(ConfigError):
         load_config(tmp_path / "missing.toml")
     version = tmp_path / "version.toml"
-    version.write_text(text.replace("version = 1", "version = 99"))
+    version.write_text(text.replace("version = 2", "version = 99"))
     loaded = load_config(version)
     assert any("not the supported version" in warning for warning in loaded.warnings)
     chain_bad = tmp_path / "chain.toml"

@@ -6,7 +6,7 @@ import random
 import pytest
 from cryptography.hazmat.primitives.serialization import Encoding
 
-from pycert import bundled, certs, compat
+from pycert import bundled, certs
 from pycert import csr as csr_module
 from pycert.errors import CryptoError
 
@@ -85,12 +85,6 @@ def test_certificate_count_limit(monkeypatch):
     pem = "".join(certs.cert_pem(c) for c in bundled.certificates()[:3])
     with pytest.raises(CryptoError, match="more than 2"):
         certs.load_certificates(pem.encode())
-
-
-def test_split_pem_block_limit():
-    pem = b"".join((b"-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----\n") for _ in range(3))
-    with pytest.raises(ValueError, match="more than 2"):
-        compat.split_pem(pem, max_blocks=2)
 
 
 def test_duplicate_certificates_are_deduplicated():

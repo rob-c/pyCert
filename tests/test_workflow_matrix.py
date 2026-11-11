@@ -303,8 +303,10 @@ def test_export_without_chain(ctx, config, issued):
 
 def test_install_with_and_without_chain(ctx, issued, tmp_path):
     state = issued()
-    plain = install_pem(ctx, state.alias, tmp_path / "a", progress=lambda _m: None)
-    chained = install_pem(ctx, state.alias, tmp_path / "b", include_chain=True, progress=lambda _m: None)
+    plain = install_pem(ctx, state.alias, tmp_path / "a", password="install passphrase", progress=lambda _m: None)
+    chained = install_pem(
+        ctx, state.alias, tmp_path / "b", include_chain=True, password="install passphrase", progress=lambda _m: None
+    )
     assert "BEGIN CERTIFICATE" in chained["cert"].read_text()
     assert chained["cert"].read_text().count("BEGIN CERTIFICATE") > plain["cert"].read_text().count(
         "BEGIN CERTIFICATE"
@@ -363,7 +365,7 @@ def test_import_unverified_is_refused_without_opt_in(ctx, issued, tmp_path, monk
     monkeypatch.setattr(
         ctx,
         "build_chain",
-        lambda certificate: chain_module.ChainResult(
+        lambda certificate, *_args, **_kwargs: chain_module.ChainResult(
             [certificate], complete=False, trusted=False, problems=["test"]
         ),
     )
@@ -404,7 +406,7 @@ def test_verify_chain_untrusted_is_failure(ctx, issued, monkeypatch):
     monkeypatch.setattr(
         ctx,
         "build_chain",
-        lambda certificate: chain_module.ChainResult(
+        lambda certificate, *_args, **_kwargs: chain_module.ChainResult(
             [certificate], complete=False, trusted=False, problems=["nope"]
         ),
     )

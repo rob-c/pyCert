@@ -1,8 +1,8 @@
 import stat
-import tomllib
 from pathlib import Path
 
 import pytest
+import tomllib
 
 from pycert.config import (
     ChainEntry,

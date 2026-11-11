@@ -8,6 +8,7 @@ import subprocess
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
+from openssl_support import legacy_pkcs12_args
 
 from pycert import bundles, certs, p12
 from pycert.errors import CryptoError, PyCertError
@@ -336,7 +337,7 @@ def test_inspect_openssl_legacy_rc2_bundle_and_rewrite(tmp_path):
     )
     subprocess.run(
         [
-            "openssl", "pkcs12", "-export", "-legacy", "-in", str(cert), "-inkey", str(key),
+            "openssl", "pkcs12", "-export", *legacy_pkcs12_args(), "-in", str(cert), "-inkey", str(key),
             "-out", str(source), "-passout", "pass:legacy-pw",
         ],
         check=True,

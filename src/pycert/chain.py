@@ -21,17 +21,20 @@ that every certificate is inside its validity window, and that no DNS name
 violates the issuer's NameConstraints.
 """
 
+import os
 import ssl
 import urllib.error
 import urllib.request
 import warnings
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Iterable, Sequence
+from pathlib import Path
 
 from cryptography import x509
 
 from . import certs
-from .compat import dataclass, field, not_valid_after, not_valid_before
+from .certs import not_valid_after, not_valid_before
 from .errors import ChainError
 
 MAX_DEPTH = 10
@@ -275,6 +278,28 @@ def build_chain(
 _system_anchors_cache: "list[x509.Certificate] | None" = None
 
 
+#: Where distributions keep the system CA bundle (PEM), first match wins.
+CA_BUNDLES = (
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  # Fedora, RHEL/AlmaLinux 8+
+    "/etc/ssl/certs/ca-certificates.crt",  # Debian, Ubuntu, Arch, Alpine
+    "/etc/pki/tls/certs/ca-bundle.crt",  # older RHEL
+    "/etc/ssl/ca-bundle.pem",  # openSUSE
+    "/etc/ssl/cert.pem",  # macOS, BSDs
+)
+
+
+def _bundle_anchors() -> "list[x509.Certificate]":
+    """The first readable CA bundle: $SSL_CERT_FILE, OpenSSL's default file, then :data:`CA_BUNDLES`."""
+    for path in (os.environ.get("SSL_CERT_FILE", ""), ssl.get_default_verify_paths().openssl_cafile, *CA_BUNDLES):
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            return x509.load_pem_x509_certificates(Path(path).read_bytes())  # raises if it holds none
+        except (OSError, ValueError):
+            continue
+    return []
+
+
 def system_anchors() -> "list[x509.Certificate]":
     """Certificates from the operating system trust store (best effort)."""
     global _system_anchors_cache
@@ -295,6 +320,11 @@ def system_anchors() -> "list[x509.Certificate]":
                     result.append(x509.load_der_x509_certificate(der))
                 except ValueError:  # pragma: no cover
                     continue
+            # The default context only lists certificates from a CA *file*. Where
+            # OpenSSL is configured with a hashed directory only (current Fedora)
+            # the list is empty, so read the distribution's bundle instead.
+            if not result:
+                result = _bundle_anchors()
     except (ssl.SSLError, OSError):  # pragma: no cover - no usable store
         result = []
     _system_anchors_cache = result
@@ -325,7 +355,7 @@ def aia_fetch(certificate: x509.Certificate, *, timeout: float = 10.0) -> "list[
             failures.append(f"{url}: unsupported scheme")
             continue
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": "pyCert/1.0"})
+            request = urllib.request.Request(url, headers={"User-Agent": "pyCertWiz/1.0"})
             with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - scheme checked
                 data = response.read(MAX_AIA_BYTES + 1)
             if len(data) > MAX_AIA_BYTES:

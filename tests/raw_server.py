@@ -64,7 +64,7 @@ class RawServer:
         while not self._stop.is_set():
             try:
                 conn, _addr = self._sock.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break

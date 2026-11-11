@@ -60,7 +60,7 @@ def _call(server: dict, args, method: str, path: str, payload=None):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Inspect or control a running pyCert sandbox CA.")
+    parser = argparse.ArgumentParser(description="Inspect or control a running pyCertWiz sandbox CA.")
     parser.add_argument("--data-dir", default=".sandbox-ca", help="directory containing sandbox.json")
     parser.add_argument("--url", help="override the server URL (default: from sandbox.json)")
     parser.add_argument("--cafile", help="trust this PEM file instead of disabling verification")

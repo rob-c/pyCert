@@ -1,6 +1,6 @@
 """PKCS#12 (.p12) writing and reading.
 
-Writing uses pyCert's own PKCS#12 container encoder
+Writing uses pyCertWiz's own PKCS#12 container encoder
 (:mod:`pycert.pkcs12_writer`) with primitives from ``cryptography``.  This keeps
 the output identical on every supported Python instead of depending on the
 OpenSSL version linked into ``cryptography`` (older releases fall back to
@@ -22,13 +22,13 @@ keystores can be imported for renewal.
 """
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import pkcs12
 
 from . import certs
-from .compat import dataclass
 from .errors import CryptoError, PyCertError
 from .pkcs12_writer import (
     DEFAULT_ITERATIONS,

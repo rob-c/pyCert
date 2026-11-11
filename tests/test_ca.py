@@ -15,7 +15,7 @@ def test_ping_and_headers(ctx, ca):
     captured = ca.captured[-1]
     assert captured.path == "/pingservice"
     assert captured.headers.get("localhost")
-    assert captured.headers.get("user-agent", "").startswith("pyCert")
+    assert captured.headers.get("user-agent", "").startswith("pyCertWiz")
     assert client.last_tls is not None
     assert "localhost" in client.last_tls.subject
     assert client.last_tls.fingerprint.count(":") == 31

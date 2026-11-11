@@ -1,12 +1,12 @@
-"""Parity tests: pyCert's CA requests match real CertWizard's golden wire fixtures.
+"""Parity tests: pyCertWiz's CA requests match real CertWizard's golden wire fixtures.
 
 The Java project records every request it sends in
-``src/test/resources/golden/requests``.  These tests drive pyCert through the
+``src/test/resources/golden/requests``.  These tests drive pyCertWiz through the
 same application operations against the mock CA and compare the captured
 requests after removing only transport/identity differences (framing,
 User-Agent, compression negotiation and connection management).
 
-The live Java-vs-pyCert differential test at the bottom is opt-in: set
+The live Java-vs-pyCertWiz differential test at the bottom is opt-in: set
 ``CERTWIZARD_JAR`` (and optionally ``JAVA_HOME``/``JAVA_BIN``) to run the real
 Java client against the same listener.
 """
@@ -49,7 +49,7 @@ def _issue_user(e2e, *, cn="golden test user", email=USER_EMAIL, wait=True):
 def _assert_captured(e2e, scenario):
     expected = load_fixtures(scenario)
     # create_request()/renew() perform a connectivity ping before submitting.
-    # That is a pyCert safety feature, not part of the CA operation under test;
+    # That is a pyCertWiz safety feature, not part of the CA operation under test;
     # keep only the paths named by this scenario's golden fixtures.
     wanted_paths = {canonical_path(item.path) for item in expected}
     actual = [item for item in e2e.ca.captured if canonical_path(item.path) in wanted_paths]
@@ -173,7 +173,7 @@ def test_opaque_revocation_request_matches_certwizard(e2e):
 
 
 # ---------------------------------------------------------------------------
-# Optional live differential: real Java CertWizard vs pyCert
+# Optional live differential: real Java CertWizard vs pyCertWiz
 # ---------------------------------------------------------------------------
 
 
@@ -214,7 +214,7 @@ def _java_tools():
 
 
 def _sandbox_client(tmp_path):
-    """A SandboxCA plus a pyCert context configured to trust it."""
+    """A SandboxCA plus a pyCertWiz context configured to trust it."""
     from pycert.config import ChainEntry, init_config, load_config, write_config
     from pycert.workflow import AppContext
     from sandbox_ca.server import SandboxCA
@@ -257,9 +257,9 @@ def test_real_java_and_pycert_send_the_same_application_requests(tmp_path):
     """Run both clients against one listener and compare their request shapes.
 
     Java's SandboxFlow does a complete user -> host -> renewal -> revocation
-    lifecycle.  pyCert is driven through the same operations, and every capture
+    lifecycle.  pyCertWiz is driven through the same operations, and every capture
     is canonicalised by endpoint; the two multisets must be equal.  The
-    connectivity pings that pyCert adds before submissions are filtered out
+    connectivity pings that pyCertWiz adds before submissions are filtered out
     because Java's flow does not make them.
     """
     from types import SimpleNamespace
@@ -294,7 +294,7 @@ def test_real_java_and_pycert_send_the_same_application_requests(tmp_path):
             if canonical_path(item.path) != "/pingservice"
         ]
 
-        # Drive pyCert through the same lifecycle.
+        # Drive pyCertWiz through the same lifecycle.
         ca.captured.clear()
         e2e = SimpleNamespace(ca=ca, config=config, ctx=ctx)
         user = _issue_user(e2e, cn="java sandbox user", email="java.sandbox@example.org", wait=False)

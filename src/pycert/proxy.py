@@ -1,7 +1,7 @@
 """RFC 3820 proxy certificates and proxy bundles.
 
 A proxy certificate is signed by an existing end-entity certificate and is
-used for short-lived delegation (the traditional GSI/Grid use case).  pyCert
+used for short-lived delegation (the traditional GSI/Grid use case).  pyCertWiz
 does not implement a general proxy authority: it creates a single delegated
 proxy from a locally stored certificate and private key, verifies the result,
 and writes a PEM bundle containing the proxy key, proxy certificate and issuer
@@ -11,6 +11,7 @@ The bundle is deliberately written with an explicit 0600 mode and can be
 removed immediately after creation for tests and short-lived jobs.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import ed448, ed25519, rsa
 from cryptography.x509.oid import NameOID, ObjectIdentifier
 
 from . import asn1, certs
-from .compat import dataclass, not_valid_after, not_valid_before
+from .certs import not_valid_after, not_valid_before
 from .errors import CryptoError, NotFound, PyCertError
 from .util import SECRET_FILE_MODE, atomic_write
 
@@ -168,7 +169,7 @@ def proxy_bundle_pem(proxy_key, proxy_cert, issuer_cert, chain, *, password: "st
 
 
 def load_proxy_bundle(path: "str | Path") -> "tuple[x509.Certificate, x509.Certificate]":
-    """Load and verify a pyCert proxy bundle, returning (proxy, issuer)."""
+    """Load and verify a pyCertWiz proxy bundle, returning (proxy, issuer)."""
     path = Path(path)
     if not path.is_file():
         raise NotFound("proxy bundle not found: %s" % path)
@@ -230,7 +231,8 @@ def create_proxy_bundle(
         now=now,
     )
     chain = ctx.store.load_chain(state)
-    bundle_text = proxy_bundle_pem(proxy_key, proxy, issuer, chain, password=password)
+    # Never write an unprotected key, not even a short-lived proxy key.
+    bundle_text = proxy_bundle_pem(proxy_key, proxy, issuer, chain, password=password or ctx.p12_passphrase())
     path = Path(out).expanduser()
     atomic_write(path, bundle_text, SECRET_FILE_MODE)
     loaded_proxy, loaded_issuer = load_proxy_bundle(path)

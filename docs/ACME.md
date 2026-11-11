@@ -30,7 +30,7 @@ ACME directory:   https://localhost:14000/acme/directory
 ```
 
 The UK-CA listener remains available at `https://localhost:8443` for the Java
-CertWizard client and pyCert.  The ACME listener is separate so either can be
+CertWizard client and pyCertWiz.  The ACME listener is separate so either can be
 used independently.
 
 | ACME option | Meaning |

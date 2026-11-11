@@ -162,9 +162,13 @@ def test_verify_and_export(config, issued, capsys, tmp_path):
     assert code == 0, err
     assert json.loads(out)["ok"] is True
     target = tmp_path / "explicit.p12"
-    code, out, err = run(["--config", str(config.path), "export", state.alias, "--out", str(target)], capsys)
+    (tmp_path / "pw").write_text("export passphrase\n")
+    code, out, err = run(
+        ["--config", str(config.path), "export", state.alias, "--out", str(target), "--password-file", str(tmp_path / "pw")],
+        capsys,
+    )
     assert code == 0, err
-    assert out.strip() == str(target)
+    assert out.strip() == f"p12: {target}"
     assert target.is_file()
     # corrupt the certificate: verify must exit 4
     ctx = AppContext.from_config(load_config(config.path))
@@ -183,7 +187,7 @@ def test_unverified_chain_exit_code_4(config, ca, capsys, monkeypatch):
     monkeypatch.setattr(
         AppContext,
         "build_chain",
-        lambda self, certificate: chain_module.ChainResult(
+        lambda self, certificate, *_args, **_kwargs: chain_module.ChainResult(
             [certificate], complete=False, trusted=False, problems=["test: no anchor"]
         ),
     )

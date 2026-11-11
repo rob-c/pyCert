@@ -1,12 +1,12 @@
-# Poll pending requests every 15 minutes. Requests that have been approved and
-# signed are downloaded and exported automatically; the command is quiet and
-# appends a line per pending request to a log.
+# Collect issued certificates (and deploy them) every 15 minutes, and mail a
+# health summary when something needs attention.
 #
 # Install with: crontab -e
 SHELL=/bin/sh
 PATH=/usr/local/bin:/usr/bin:/bin
+CONFIG=$HOME/.config/pycert/pycert.toml
 
-*/15 * * * *  pycert -q --config "$HOME/.config/pycert/pycert.toml" status --refresh >> "$HOME/.local/state/pycert-refresh.log" 2>&1
+*/15 * * * *  pycert -q --config "$CONFIG" watch --once >> "$HOME/.local/state/pycert-watch.log" 2>&1
 
-# Optional: verify all stored certificates daily and log failures (exit 4).
-17 6 * * *  for a in $(pycert --config "$HOME/.config/pycert/pycert.toml" list --json | python3 -c 'import json,sys;print(" ".join(s["alias"] for s in json.load(sys.stdin)))'); do pycert -q --config "$HOME/.config/pycert/pycert.toml" verify "$a" || echo "verify failed: $a"; done >> "$HOME/.local/state/pycert-verify.log" 2>&1
+# cron mails any output: 'check' prints only when the level is not OK.
+17 7 * * *    out=$(pycert --config "$CONFIG" check --warn 30 --crit 7 -v) || echo "$out"

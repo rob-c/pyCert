@@ -77,16 +77,17 @@ def test_file_backend_errors_and_locking(tmp_path, monkeypatch, capsys):
 
 
 def test_keychain_and_secret_service_and_command_backends(tmp_path, monkeypatch):
+    monkeypatch.setattr(secrets_store.shutil, "which", lambda name: "/usr/bin/" + name)  # `security` is macOS-only
     store = _store(tmp_path, backend="keychain")
     monkeypatch.setattr(store, "_subprocess", lambda *a, **k: SimpleNamespace(returncode=44, stdout="", stderr=""))
     assert store._get("x") is None
-    monkeypatch.setattr(store, "_subprocess", lambda *a, **k: _python("value\n"))
+    monkeypatch.setattr(
+        store, "_subprocess", lambda *a, **k: SimpleNamespace(returncode=0, stdout="attributes", stderr='password: "value"\n')
+    )
     assert store._get("x") == "value"
     monkeypatch.setattr(store, "_subprocess", lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="locked"))
     with pytest.raises(SecretError):
         store._get("x")
-    with pytest.raises(SecretError):
-        store._set("bad value", "x")
     monkeypatch.setattr(store, "_subprocess", lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="bad"))
     with pytest.raises(SecretError):
         store._set("value", "x")
@@ -106,7 +107,12 @@ def test_keychain_and_secret_service_and_command_backends(tmp_path, monkeypatch)
 
     store = _store(tmp_path, backend="command", command="cmd")
     monkeypatch.setattr(store, "_subprocess", lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="bad"))
-    assert store._get("x") is None
+    # A failing command is an error, never "missing": ensure() must not replace the secret.
+    with pytest.raises(SecretError, match="bad"):
+        store._get("x")
+    assert store.get("x", allow_missing=True) is None
+    with pytest.raises(SecretError):
+        store.ensure("x")
     with pytest.raises(SecretError):
         store._set("value", "x")
     monkeypatch.setattr(store, "_subprocess", lambda *a, **k: _python("value\n"))

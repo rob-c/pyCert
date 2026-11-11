@@ -21,13 +21,13 @@ import contextlib
 import json
 import os
 import threading
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
 from . import certs
 from . import csr as csr_module
-from .compat import dataclass, field
 from .errors import NotFound, PyCertError
 from .util import (
     DIR_MODE,
@@ -45,7 +45,7 @@ try:  # POSIX only; Windows falls back to no locking (documented).
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 MAX_STATE_BYTES = 2 * 1024 * 1024
 STATE_FILE = "state.json"
 KEY_FILE = "key.pem"
@@ -79,7 +79,7 @@ STATUSES = (
     STATUS_IMPORTED,
 )
 
-#: statuses for which pyCert should keep polling the CA
+#: statuses for which pyCertWiz should keep polling the CA
 PENDING_STATUSES = (STATUS_DRAFT, STATUS_SUBMITTED, STATUS_APPROVED, STATUS_SIGNED)
 
 
@@ -178,6 +178,18 @@ class RequestState:
     history: "list[dict]" = field(default_factory=list)
     notes: "list[str]" = field(default_factory=list)
     version: int = STATE_VERSION
+    #: CA profile name (empty = the primary CA, for requests made before 2.0)
+    ca: str = ""
+    #: provider-specific durable data (e.g. ACME order and certificate URLs)
+    provider: dict = field(default_factory=dict)
+    #: deployment targets for this certificate (see pycert.deploy)
+    deploy: "list[dict]" = field(default_factory=list)
+    #: include this certificate in 'pycert renew --due' and the GUI auto-renewal
+    auto_renew: bool = True
+    #: free-text description shown in listings ("web front-end", "grid UI"...)
+    description: str = ""
+    #: linked Java keystore: {"name": link, "alias": Java alias, "written": sha256 last written}
+    keystore: dict = field(default_factory=dict)
 
     # -- helpers -----------------------------------------------------------
     @property
@@ -241,6 +253,12 @@ class RequestState:
             "p12_sha256": self.p12_sha256,
             "history": list(self.history),
             "notes": list(self.notes),
+            "ca": self.ca,
+            "provider": dict(self.provider),
+            "deploy": [dict(item) for item in self.deploy],
+            "auto_renew": self.auto_renew,
+            "description": self.description,
+            "keystore": dict(self.keystore),
         }
 
     @classmethod
@@ -272,6 +290,12 @@ class RequestState:
             p12_sha256=data.get("p12_sha256", ""),
             history=list(data.get("history", [])),
             notes=list(data.get("notes", [])),
+            ca=str(data.get("ca", "") or ""),
+            provider=dict(data.get("provider") or {}),
+            deploy=[dict(item) for item in (data.get("deploy") or []) if isinstance(item, dict)],
+            auto_renew=bool(data.get("auto_renew", True)),
+            description=str(data.get("description", "") or ""),
+            keystore=dict(data.get("keystore") or {}),
         )
 
 

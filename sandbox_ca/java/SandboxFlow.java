@@ -115,6 +115,11 @@ public final class SandboxFlow {
             throw new IllegalStateException("the sandbox does not know the host key");
         }
 
+        // The GUI offers renewal only for entries whose CA record (looked up by
+        // public key: status VALID, contact e-mail) it has refreshed.
+        if (new ResourcesPublicKey(userKeys.getPublic()).isExist()) {
+            throw new IllegalStateException("the sandbox has no record of the user certificate");
+        }
         KeyPair renewKeys = rsa();
         OnlineCertRenewRequest renewal = new OnlineCertRenewRequest(
                 userCert, userKeys.getPrivate(), renewKeys, EMAIL);

@@ -1,6 +1,6 @@
 """Large emulation matrix for the legacy UK-CA listener.
 
-These cases exercise the server the way CertWizard and pyCert do: real TLS
+These cases exercise the server the way CertWizard and pyCertWiz do: real TLS
 sockets, XML request bodies, PPPK challenges, status lookup, download and
 revocation.  The matrix focuses on protocol edges rather than repeating the
 happy-path workflow tests.

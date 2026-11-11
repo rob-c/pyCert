@@ -118,7 +118,7 @@ a `<PublicKey>` element, which distinguishes it from a user request.
 | `POST` | `/resources/resource/publickey/pk` | none | 200 / 404 | status lookup by base64 SPKI |
 | `GET` | `/certificate/<id>` | none | 200 | download issued leaf certificate |
 | `POST` | `/revoke` | PPPK | 201 | revoke a certificate |
-| `GET` | `/ca/issuer.pem` | none | 200 | optional AIA issuer fetch (sandbox/pyCert; the Java client normally builds chains from its truststore) |
+| `GET` | `/ca/issuer.pem` | none | 200 | optional AIA issuer fetch (sandbox/pyCertWiz; the Java client normally builds chains from its truststore) |
 
 Status codes used by the Java client:
 
@@ -241,7 +241,7 @@ authenticating certificate:
   supports only the nonce challenge.
 
 The sandbox accepts renewal on both `/CSR` and `/CSRs` to cover old and new
-clients. pyCert follows the current Java client and posts renewal to `/CSR`.
+clients. pyCertWiz follows the current Java client and posts renewal to `/CSR`.
 
 ## 7. PPPK authentication
 
@@ -315,7 +315,7 @@ Return **200**:
 
 Fields the Java client reads: `id`, `status`, `owner`, `role`, `useremail`,
 `startdate`, `enddate`, `lifedays`, `renew`. Dates are `dd/MM/yyyy`. The inline
-`X509Certificate` is optional for pyCert but is used by Java's status path when
+`X509Certificate` is optional for pyCertWiz but is used by Java's status path when
 it wants to refresh a chain; include it for maximum compatibility. Status
 `VALID` is what makes the client download/install the certificate.
 
@@ -521,14 +521,14 @@ this automatically.
 ## 16. Full runnable mock CA
 
 The full mock CA lives in [`sandbox_ca/`](../sandbox_ca/) and
-shares its protocol code with the pyCert test suite (`tests/mock_ca.py` is a
+shares its protocol code with the pyCertWiz test suite (`tests/mock_ca.py` is a
 compatibility shim). The same server also exposes an RFC 8555 ACME v2 front-end
 for certbot/nginx; see [ACME.md](ACME.md) and the STFC modernisation dossier
 [STFC-ACME-MODERNISATION.md](STFC-ACME-MODERNISATION.md).
 
 ### 16.1 Start it
 
-From the pyCert repository:
+From the pyCertWiz repository:
 
 ```sh
 python3 -m sandbox_ca --data-dir .sandbox-ca --port 8443
@@ -601,7 +601,7 @@ python3 -m sandbox_ca.admin --data-dir .sandbox-ca settings --valid-days 30
 `settings` accepts `auto_approve` (bool), `sign_after_polls` (int),
 `valid_days` / `host_valid_days` (certificate lifetime), and the fault-injection
 modes `pppk_mode`, `lookup_mode`, `download_mode`, `info_mode` (the same modes
-used by the pyCert test suite: `no_challenge`, `opaque`, `bad_keyid`,
+used by the pyCertWiz test suite: `no_challenge`, `opaque`, `bad_keyid`,
 `bad_response`, `no_inline`, `csr_only`, `malformed`, `wrong_pem`, `bare_pem`,
 `wrong_cert`, etc.).
 

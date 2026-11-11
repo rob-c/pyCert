@@ -46,7 +46,7 @@ class E2E:
         return self.run(*args, json_mode=True)
 
     # -- CA state helpers --------------------------------------------------
-    def request_user(self, cn="e2e user", *, alias=None, wait=False, extra=(), key_algorithm="ec"):
+    def request_user(self, cn="e2e user", *, alias=None, wait=False, extra=(), key_algorithm="rsa"):
         args = ["request", cn, "--pin", self.PIN, "--key-algorithm", key_algorithm, *extra]
         if alias:
             args += ["--alias", alias]
@@ -65,7 +65,7 @@ class E2E:
             "--pin",
             self.PIN,
             "--key-algorithm",
-            "ec",
+            "rsa",
         ]
         if wait:
             args += ["--wait", "--interval", "0.2", "--timeout", "30"]

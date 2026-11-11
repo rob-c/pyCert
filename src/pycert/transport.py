@@ -40,11 +40,11 @@ import socket
 import ssl
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import timezone
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlsplit
 
-from .compat import dataclass, field, set_minimum_tls_version
 from .errors import NetworkError
 
 __all__ = [
@@ -56,7 +56,7 @@ __all__ = [
     "DEFAULT_USER_AGENT",
 ]
 
-DEFAULT_USER_AGENT = "pyCert/1.0"
+DEFAULT_USER_AGENT = "pyCertWiz/1.0"
 RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 REDIRECT_STATUS = frozenset({301, 302, 303, 307, 308})
 MAX_HEADER_COUNT = 200
@@ -280,7 +280,9 @@ class Transport:
         if self._ssl_context is not None:
             return self._ssl_context
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        set_minimum_tls_version(context, self.config.min_tls_version)
+        context.minimum_version = (
+            ssl.TLSVersion.TLSv1_3 if self.config.min_tls_version == "1.3" else ssl.TLSVersion.TLSv1_2
+        )
         if not self.config.tls_verify:
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
@@ -348,7 +350,7 @@ class Transport:
                 sock.settimeout(min(self.config.connect_timeout, remaining))
                 sock.connect(sockaddr)
                 return sock
-            except socket.timeout:
+            except TimeoutError:
                 errors.append("timeout")
                 if sock is not None:
                     sock.close()
@@ -499,7 +501,7 @@ class Transport:
             encoding = response_headers.get("content-encoding", "identity").strip().lower()
             if encoding not in ("", "identity"):
                 raise TransportError(
-                    "server sent a compressed response (%s); pyCert requires identity" % encoding,
+                    "server sent a compressed response (%s); pyCertWiz requires identity" % encoding,
                     kind="protocol",
                     retryable=False,
                 )
@@ -523,7 +525,7 @@ class Transport:
             raise TransportError(
                 "TLS error talking to %s: %s" % (host, exc), kind=kind, retryable=retryable, url=url
             )
-        except socket.timeout:
+        except TimeoutError:
             raise TransportError("timed out talking to %s" % host, kind="timeout", retryable=True, url=url)
         except (http.client.IncompleteRead, http.client.BadStatusLine, http.client.LineTooLong) as exc:
             raise TransportError(
@@ -562,7 +564,7 @@ class Transport:
             ("Host", header_host),
             ("User-Agent", self.config.user_agent or DEFAULT_USER_AGENT),
             # Match CertWizard's application headers.  Accept-Encoding and
-            # Connection are transport details; pyCert asks for identity so a
+            # Connection are transport details; pyCertWiz asks for identity so a
             # compressed response can never bypass the size limit.
             ("Accept", "*/*"),
             ("Date", email.utils.formatdate(usegmt=True)),

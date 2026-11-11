@@ -1,6 +1,6 @@
 """A mock UK e-Science CA server for the test suite.
 
-It implements just enough of the OpenCA / CertWizard protocol to exercise pyCert
+It implements just enough of the OpenCA / CertWizard protocol to exercise pyCertWiz
 end to end over real TLS:
 
 * ``GET /pingservice``, ``GET /CA``, ``GET /CA/motd/text``
@@ -13,7 +13,7 @@ end to end over real TLS:
 
 The CA hierarchy is deliberately mixed: an RSA root signing an ECDSA
 intermediate, which signs the endpoints' certificates.  That exercises both
-signature families in pyCert's chain builder.
+signature families in pyCertWiz's chain builder.
 
 Nothing here is meant to be secure; it is a test double.
 """
@@ -27,6 +27,7 @@ import struct
 import threading
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -37,7 +38,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, NameOID
 
 from pycert import certs
-from pycert.compat import csr_signature_valid, dataclass, field, not_valid_after, not_valid_before
+from pycert.certs import not_valid_after, not_valid_before
 
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
@@ -74,6 +75,26 @@ def _spki_b64(cert_or_key) -> str:
     return base64.b64encode(
         key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
     ).decode()
+
+
+#: The order the UK e-Science CA (OpenCA) issues subject attributes in,
+#: whatever order the CSR used: C, O, OU, L, CN, then anything else.
+_PRODUCTION_RDN_ORDER = {
+    NameOID.COUNTRY_NAME: 0,
+    NameOID.ORGANIZATION_NAME: 1,
+    NameOID.ORGANIZATIONAL_UNIT_NAME: 2,
+    NameOID.LOCALITY_NAME: 3,
+    NameOID.COMMON_NAME: 4,
+    NameOID.EMAIL_ADDRESS: 5,
+}
+
+#: The PPPK realm the production CA sends in its 401 challenge.
+PPPK_REALM = "UK e-Science CA"
+
+
+def production_subject(name: x509.Name) -> x509.Name:
+    """*name* re-ordered as the production CA issues it (a stable sort)."""
+    return x509.Name(sorted(name.rdns, key=lambda rdn: min(_PRODUCTION_RDN_ORDER.get(a.oid, 6) for a in rdn)))
 
 
 @dataclass
@@ -427,8 +448,8 @@ class MockCA:
         root_name = x509.Name(
             [
                 x509.NameAttribute(NameOID.COUNTRY_NAME, "UK"),
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "pyCert Test Root"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "pyCert Test Root CA"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "pyCertWiz Test Root"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "pyCertWiz Test Root CA"),
             ]
         )
         self.root = (
@@ -464,8 +485,8 @@ class MockCA:
         intermediate_name = x509.Name(
             [
                 x509.NameAttribute(NameOID.COUNTRY_NAME, "UK"),
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "pyCert Test CA"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "pyCert Test Issuing CA"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "pyCertWiz Test CA"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "pyCertWiz Test Issuing CA"),
             ]
         )
         self.intermediate = (
@@ -531,7 +552,7 @@ class MockCA:
                 x509.Name(
                     [
                         x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
-                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "pyCert Test"),
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "pyCertWiz Test"),
                     ]
                 )
             )
@@ -585,7 +606,7 @@ class MockCA:
             days = self.host_valid_days if kind == "host" else self.valid_days
         builder = (
             x509.CertificateBuilder()
-            .subject_name(csr.subject)
+            .subject_name(production_subject(csr.subject))
             .issuer_name(self.intermediate.subject)
             .public_key(csr.public_key())
             .serial_number(x509.random_serial_number())
@@ -1056,7 +1077,7 @@ class MockCA:
                     request = x509.load_pem_x509_csr(pem.encode())
                 except ValueError:
                     return self._send(202, ca._error_xml("could not parse the CSR"))
-                if not csr_signature_valid(request):
+                if not request.is_signature_valid:
                     return self._send(202, ca._error_xml("CSR signature is invalid"))
                 if "@" not in email:
                     return self._send(202, ca._error_xml("Email is not valid"))
@@ -1104,7 +1125,7 @@ class MockCA:
                     request = x509.load_pem_x509_csr(pem.encode())
                 except ValueError:
                     return self._send(202, ca._error_xml("could not parse the CSR"))
-                if not csr_signature_valid(request):
+                if not request.is_signature_valid:
                     return self._send(202, ca._error_xml("CSR signature is invalid"))
                 if kind == "renew" and ca.require_email_match:
                     try:
@@ -1128,7 +1149,7 @@ class MockCA:
                     return self._send(403, ca._error_xml("client certificate must be RSA"))
 
                 mode = ca.pppk_mode
-                realm = "mock-realm"
+                realm = PPPK_REALM
                 nonce = "Tm9uY2UtMTIzNDU2Nzg5MA=="
                 if mode == "no_challenge":
                     return self._accept_csr(request, pin, email, kind)
@@ -1357,7 +1378,7 @@ class MockCA:
                     out = ca._error_xml("authentication required")
                     self.send_response(401)
                     self.send_header("Content-Type", "application/xml")
-                    self.send_header("realm", "mock-realm")
+                    self.send_header("realm", PPPK_REALM)
                     self.send_header("nonce", "UmV2b2tlLU5vbmNl")
                     self.send_header("keyid", f"{key.public_numbers().n:x}.{key.public_numbers().e:x}")
                     self.send_header("Content-Length", str(len(out)))

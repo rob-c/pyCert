@@ -66,9 +66,9 @@ def test_proxy_key_and_certificate_are_in_bundle(tmp_path, ctx, issued):
     target = tmp_path / "keyed.pem"
     create_proxy_bundle(ctx, state.alias, target, hours=1)
     data = target.read_bytes()
-    assert b"BEGIN PRIVATE KEY" in data
+    assert b"BEGIN ENCRYPTED PRIVATE KEY" in data and b"BEGIN PRIVATE KEY" not in data
     proxy, issuer = load_proxy_bundle(target)
-    private = serialization.load_pem_private_key(data, password=None)
+    private = serialization.load_pem_private_key(data, password=ctx.p12_passphrase().encode())
     assert certs.certificate_matches_key(proxy, private)
     assert certs.certificate_matches_key(issuer, ctx.store.load_key(state, ctx.key_passphrase()))
 

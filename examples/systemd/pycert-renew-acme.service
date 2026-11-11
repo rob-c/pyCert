@@ -1,0 +1,14 @@
+[Unit]
+Description=Renew ACME host certificates that expire within 30 days
+Documentation=https://github.com/rob-c/pyCertWiz/blob/main/docs/ACME_CLIENT.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# ACME renewals need no human step, so they can run unattended.  UK e-Science
+# CA renewals are approved by an RA and carry a PIN: renew those from the GUI
+# or 'pycert renew', and let 'pycert check' tell you when they are due.
+ExecStart=/usr/local/bin/pycert -q --config %h/.config/pycert/pycert.toml renew --due 30 --ca letsencrypt --wait --yes
+NoNewPrivileges=yes
+PrivateTmp=yes

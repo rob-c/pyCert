@@ -1,0 +1,17 @@
+[Unit]
+Description=Collect issued pyCertWiz certificates and deploy them
+Documentation=https://github.com/rob-c/pyCertWiz/blob/main/docs/OPERATIONS.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# One polling cycle: pending requests that the CA has signed are downloaded,
+# verified, exported and deployed (deployment targets run their reload hooks).
+ExecStart=/usr/local/bin/pycert -q --config %h/.config/pycert/pycert.toml watch --once
+# The saved passphrase must be available: run as the logged-in user with the
+# keychain/secret-service backend, or use the 'command' or 'env' backend.
+# For host certificates deployed to /etc, run as root with a root-owned
+# configuration (see docs/OPERATIONS.md) and remove the %h paths.
+NoNewPrivileges=yes
+PrivateTmp=yes

@@ -4,22 +4,38 @@ import contextlib
 import hashlib
 import os
 import re
+import shutil
 import stat
 import tempfile
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .compat import parse_iso_datetime
 from .errors import PyCertError
 
 # Directory/file modes used everywhere.  The private key and the PKCS#12 file
-# are only ever readable by the owner; pyCert refuses to write them any other
+# are only ever readable by the owner; pyCertWiz refuses to write them any other
 # way (unlike the Java client, which left keystore permissions to the default
 # umask).
 DIR_MODE = 0o700
 SECRET_FILE_MODE = 0o600
 PUBLIC_FILE_MODE = 0o644
+
+
+def command_problem(program: str) -> str:
+    """Why *program* (a hook's first word) cannot be started; '' if it can.
+
+    Checked before running a hook so a missing or non-executable program gets a
+    clear message everywhere. Under emulation (x86_64 containers on Apple
+    silicon) the exec error can otherwise be lost, leaving only "exit 127".
+    """
+    if os.sep in program:
+        if not os.path.exists(program):
+            return "not found"
+        if os.path.isdir(program) or not os.access(program, os.X_OK):
+            return "not executable"
+        return ""
+    return "" if shutil.which(program) else "not found on PATH"
 
 
 def utcnow() -> datetime:
@@ -33,7 +49,18 @@ def iso(when: "datetime | None" = None) -> str:
 
 
 def parse_iso(text: str) -> datetime:
-    return parse_iso_datetime(text)
+    """Parse an ISO-8601 timestamp; naive values are taken as UTC.
+
+    ``datetime.fromisoformat`` only accepts a trailing ``Z`` from Python 3.11,
+    and pyCertWiz writes ``Z`` timestamps, so normalise it first.
+    """
+    if not isinstance(text, str):
+        raise ValueError("timestamp must be a string")
+    value = text.strip()
+    if value[-1:] in ("Z", "z"):
+        value = value[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def sha256_hex(data: bytes) -> str:
@@ -91,7 +118,11 @@ def atomic_write(path: Path, data: "bytes | str", mode: int = SECRET_FILE_MODE) 
     if isinstance(data, str):
         data = data.encode("utf-8")
     path = Path(path)
-    ensure_dir(path.parent)
+    if not path.parent.is_dir():
+        # Create a missing parent privately, but never re-mode an existing one:
+        # a web root, /etc/grid-security or the user's chosen export folder must
+        # keep its permissions.  Private directories are ensured by their owners.
+        ensure_dir(path.parent)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as handle:

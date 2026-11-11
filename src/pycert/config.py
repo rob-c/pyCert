@@ -1,40 +1,67 @@
-"""Configuration: TOML file, dataclasses, validation, secrets and paths.
+"""Configuration: TOML file, dataclasses, validation, CA profiles and paths.
 
-A pyCert configuration describes one CA and one identity profile.  It is a
-plain TOML file so it can be reviewed, diffed and version-controlled:
+A pyCertWiz configuration is a plain TOML file so it can be reviewed, diffed and
+version-controlled.  It describes one *primary* CA (the UK e-Science CA by
+default) plus any number of additional named CA profiles:
 
-* ``[ca]``          - server URL, timeouts, TLS policy, endpoint paths;
+* ``[ca]``          - the primary CA: server URL, timeouts, TLS policy, endpoints;
 * ``[identity]``    - organisation / OU / locality / country, default e-mail, RA;
 * ``[keys]``        - key algorithm and size;
 * ``[csr]``         - hash algorithm and requested extensions;
 * ``[p12]``         - output file naming;
 * ``[secrets]``     - where the saved PKCS#12 passphrase lives;
-* ``[[chain.certificates]]`` - the full CA chain, either as files or inline PEM,
-  each optionally pinned by SHA-256.
+* ``[[chain.certificates]]`` - the primary CA chain, either as files or inline
+  PEM, each optionally pinned by SHA-256;
+* ``[cas.<name>]``  - additional CA profiles.  ``kind = "ukca"`` profiles speak
+  the CertWizard protocol (e.g. a test or second UK-CA instance) and accept the
+  same keys as ``[ca]`` plus ``[cas.<name>.identity]`` and
+  ``[[cas.<name>.chain]]``; ``kind = "acme"`` profiles describe an RFC 8555
+  ACME CA (Let's Encrypt, Sectigo/Jisc with EAB, or a future UK-CA ACME
+  service).  Other kinds can be supplied by plugins, see
+  :mod:`pycert.providers`.
 
-Nothing secret is stored in this file.  The PKCS#12 passphrase is held in the
-OS secret store (or a 0600 file, or an external command); see
-:mod:`pycert.secrets_store`.
+``default_ca`` names the profile used for new requests when none is given.
+Every stored request records the profile it belongs to.
+
+Nothing secret is stored in this file.  The PKCS#12 passphrase and ACME EAB
+keys are held in the OS secret store (or a 0600 file, or an external command);
+see :mod:`pycert.secrets_store`.
 """
 
 import os
 import re
+import sys
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from cryptography import x509
 
 from . import bundled, certs
-from .compat import dataclass, field
 from .errors import ConfigError
-from .toml import TOMLDecodeError
-from .toml import loads as toml_loads
 from .util import ensure_dir, normalize_fingerprint
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
+
+TOMLDecodeError = tomllib.TOMLDecodeError
+toml_loads = tomllib.loads
 
 DEFAULT_BASE_URL = "https://cwiz-live.ca.ngs.ac.uk:443"
 DEFAULT_VERSION_STRING = "CertWizard 2.2.1"
-DEFAULT_USER_AGENT = "pyCert/1.0"
-CONFIG_VERSION = 1
+DEFAULT_USER_AGENT = "pyCertWiz/2.0"
+DEFAULT_CA_NAME = "uk-escience"
+DEFAULT_CA_DISPLAY_NAME = "UK e-Science CA"
+CONFIG_VERSION = 2
+SUPPORTED_CONFIG_VERSIONS = (1, 2)
+MAX_CONFIG_BYTES = 1024 * 1024
+PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+ACME_CHALLENGES = ("http-01", "dns-01")
+ACME_HTTP_MODES = ("standalone", "webroot")
+ACME_ACCOUNT_KEYS = ("ec", "rsa")
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +102,8 @@ class CAConfig:
     allow_plaintext: bool = False
     allow_sha1: bool = False
     endpoints: Endpoints = field(default_factory=Endpoints)
+    name: str = DEFAULT_CA_NAME
+    display_name: str = DEFAULT_CA_DISPLAY_NAME
 
     def url(self, name: str) -> str:
         return self.base_url.rstrip("/") + getattr(self.endpoints, name)
@@ -120,7 +149,7 @@ class PathsConfig:
 
 @dataclass
 class SecretConfig:
-    backend: str = "auto"  # auto | keychain | secret-service | file | command | env | prompt
+    backend: str = "auto"  # auto | keychain | secret-service | keyring | file | command | env | prompt
     service: str = "pyCert"
     account: str = "default"
     key_account: str = ""  # empty = reuse the [secrets].account secret
@@ -128,6 +157,44 @@ class SecretConfig:
     command: str = ""
     command_timeout: float = 15.0
     env_var: str = "PYCERT_P12_PASSPHRASE"
+
+
+@dataclass
+class ACMEConfig:
+    """Settings for an RFC 8555 ACME CA profile.
+
+    The EAB HMAC key is a secret and is never stored here: it is kept in the
+    secret store under the account ``acme-eab:<profile>`` (``pycert ca eab``),
+    or read from the environment variable named by ``eab_hmac_env``.
+    """
+
+    contact: "list[str]" = field(default_factory=list)  # e-mail addresses; default identity.email
+    terms_agreed: bool = False
+    eab_kid: str = ""
+    eab_hmac_env: str = ""
+    account_key: str = "ec"  # ec (P-256) | rsa (3072)
+    challenge: str = "http-01"  # http-01 | dns-01
+    http_mode: str = "standalone"  # standalone | webroot
+    http_port: int = 80
+    http_bind: str = ""
+    webroot: str = ""
+    dns_hook: str = ""  # '<hook> add|remove <domain> <record-name> <value>'; empty = manual
+    dns_propagation_seconds: float = 0.0
+    validation_timeout: float = 300.0
+    poll_interval: float = 2.0
+
+
+@dataclass
+class KeystoreLink:
+    """A Java PKCS#12 keystore kept in step with pyCertWiz's store (see :mod:`pycert.keystore`)."""
+
+    name: str
+    path: str
+    ca: str = ""  # CA profile the keystore's certificates belong to (default: the primary CA)
+    auto_import: bool = True  # import key entries pyCertWiz does not manage yet
+    write_back: bool = True  # write issued and renewed certificates into the keystore
+    # The passphrase is deliberately not configurable here: it is never stored and is
+    # asked for in each session.
 
 
 @dataclass
@@ -170,8 +237,207 @@ class ChainBundle:
         return "".join(certs.cert_pem(c) for c in self.anchors)
 
 
+def load_chain_entries(
+    entries: "Sequence[ChainEntry]", base: Path, warnings: "list[str]", *, where_prefix: str = "chain.certificates"
+) -> ChainBundle:
+    """Load and pin-check chain entries (files relative to *base*)."""
+    loaded: "list[x509.Certificate]" = []
+    anchors: "list[x509.Certificate]" = []
+    sources: "list[str]" = []
+    for index, entry in enumerate(entries):
+        where = f"{where_prefix}[{index}]"
+        if entry.pem:
+            data = entry.pem.encode()
+            source = f"inline PEM ({entry.label or 'unnamed'})"
+        else:
+            path = entry.resolved_path(base)
+            if path is None:
+                raise ConfigError(f"{where}: either 'file' or 'pem' is required")
+            if not path.is_file():
+                raise ConfigError(f"{where}: certificate file not found: {path}")
+            data = path.read_bytes()
+            source = str(path)
+        try:
+            parsed = certs.load_certificates(data)
+        except Exception as exc:  # noqa: BLE001
+            raise ConfigError(f"{where}: {exc}") from exc
+        if entry.sha256:
+            expected = normalize_fingerprint(entry.sha256)
+            for cert in parsed:
+                actual = certs.fingerprint(cert)
+                if actual != expected:
+                    raise ConfigError(
+                        f"{where}: certificate fingerprint mismatch for {source}\n"
+                        f"  expected {expected}\n  actual   {actual}\n"
+                        "Refusing to use a CA certificate that does not match its pin."
+                    )
+        loaded.extend(parsed)
+        if entry.anchor:
+            anchors.extend(parsed)
+        sources.append(source)
+    return ChainBundle(loaded, anchors, sources)
+
+
 # ---------------------------------------------------------------------------
-# Loading
+# CA profiles
+# ---------------------------------------------------------------------------
+
+
+class CAProfile:
+    """One CA the configuration knows about.
+
+    The primary profile is a live view of the top-level ``[ca]``,
+    ``[identity]`` and ``[chain]`` sections, so editing ``config.ca`` (the CLI's
+    ``config set`` and the GUI settings dialog do) is reflected immediately.
+    A profile can be passed wherever a :class:`~pycert.ca.CAClient` expects a
+    configuration: it exposes ``ca``, ``tls_trust_pem()`` and
+    ``use_system_trust()``.
+    """
+
+    def __init__(
+        self,
+        config: "Config",
+        name: str,
+        *,
+        kind: str = "ukca",
+        display_name: str = "",
+        ca: "CAConfig | None" = None,
+        chain: "list[ChainEntry] | None" = None,
+        identity: "IdentityConfig | None" = None,
+        acme: "ACMEConfig | None" = None,
+        primary: bool = False,
+    ):
+        self._config = config
+        self._name = name
+        self.kind = kind
+        self._display_name = display_name
+        self._ca = ca if ca is not None else CAConfig(name=name, display_name=display_name)
+        self._chain = list(chain or [])
+        self._identity = identity
+        self.acme = acme if acme is not None else ACMEConfig()
+        self.primary = primary
+        self._bundle: "ChainBundle | None" = None
+
+    # -- live views ----------------------------------------------------------
+    @property
+    def name(self) -> str:
+        return self._config.ca.name if self.primary else self._name
+
+    @property
+    def display_name(self) -> str:
+        if self.primary:
+            return self._config.ca.display_name or self._config.ca.name
+        return self._display_name or self._name
+
+    @display_name.setter
+    def display_name(self, value: str) -> None:
+        if self.primary:
+            self._config.ca.display_name = value
+        else:
+            self._display_name = value
+
+    @property
+    def ca(self) -> CAConfig:
+        return self._config.ca if self.primary else self._ca
+
+    @property
+    def chain(self) -> "list[ChainEntry]":
+        return self._config.chain if self.primary else self._chain
+
+    @chain.setter
+    def chain(self, entries: "list[ChainEntry]") -> None:
+        if self.primary:
+            self._config.chain = list(entries)
+        else:
+            self._chain = list(entries)
+        self.invalidate()
+
+    @property
+    def own_identity(self) -> "IdentityConfig | None":
+        return None if self.primary else self._identity
+
+    @property
+    def identity(self) -> IdentityConfig:
+        """The identity defaults for requests on this CA (falls back to ``[identity]``)."""
+        if self.primary or self._identity is None:
+            return self._config.identity
+        return self._identity
+
+    @property
+    def directory_url(self) -> str:
+        """The ACME directory URL (``base_url`` of an ACME profile)."""
+        return self.ca.base_url
+
+    @property
+    def config(self) -> "Config":
+        return self._config
+
+    @property
+    def csr(self) -> CSRConfig:
+        return self._config.csr
+
+    # -- trust ---------------------------------------------------------------
+    @property
+    def bundle(self) -> ChainBundle:
+        if self.primary:
+            return self._config.bundle
+        if self._bundle is None:
+            self._bundle = load_chain_entries(
+                self._chain, self._config.directory, self._config.warnings, where_prefix=f"cas.{self._name}.chain"
+            )
+        return self._bundle
+
+    def invalidate(self) -> None:
+        self._bundle = None
+        if self.primary:
+            self._config.invalidate_chain_cache()
+
+    def tls_trust_pem(self) -> str:
+        if self.ca.tls_trust in ("chain", "both") and self.bundle.anchors:
+            return self.bundle.anchor_pem()
+        return ""
+
+    def use_system_trust(self) -> bool:
+        return self.ca.tls_trust in ("system", "both")
+
+    def contact_emails(self) -> "list[str]":
+        return list(self.acme.contact) or ([self.identity.email] if self.identity.email else [])
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"CAProfile(name={self.name!r}, kind={self.kind!r}, primary={self.primary})"
+
+    def as_dict(self) -> dict:
+        data: "dict[str, Any]" = {
+            "name": self.name,
+            "kind": self.kind,
+            "display_name": self.display_name,
+            "primary": self.primary,
+            "base_url": self.ca.base_url,
+            "tls_trust": self.ca.tls_trust,
+            "tls_verify": self.ca.tls_verify,
+        }
+        if self.kind == "acme":
+            data["acme"] = {
+                "contact": self.contact_emails(),
+                "terms_agreed": self.acme.terms_agreed,
+                "eab_kid": self.acme.eab_kid,
+                "challenge": self.acme.challenge,
+                "http_mode": self.acme.http_mode,
+                "http_port": self.acme.http_port,
+                "webroot": self.acme.webroot,
+                "dns_hook": self.acme.dns_hook,
+                "account_key": self.acme.account_key,
+            }
+        if not self.primary:
+            data["chain"] = [
+                {"label": e.label, "file": e.file, "sha256": e.sha256, "anchor": e.anchor, "pem": "<inline>" if e.pem else None}
+                for e in self._chain
+            ]
+        return data
+
+
+# ---------------------------------------------------------------------------
+# Loading helpers
 # ---------------------------------------------------------------------------
 
 
@@ -197,7 +463,7 @@ def _section(data: dict, key: str, where: str) -> dict:
 
 
 class Config:
-    """A loaded, validated pyCert configuration."""
+    """A loaded, validated pyCertWiz configuration."""
 
     def __init__(
         self,
@@ -212,6 +478,10 @@ class Config:
         secrets: SecretConfig,
         chain: "list[ChainEntry]",
         warnings: "list[str] | None" = None,
+        *,
+        default_ca: str = "",
+        extra_cas: "dict[str, CAProfile] | None" = None,
+        keystores: "list[KeystoreLink] | None" = None,
     ):
         self.path = path
         self.profile = profile
@@ -225,6 +495,66 @@ class Config:
         self.chain = chain
         self.warnings = warnings or []
         self._bundle: "ChainBundle | None" = None
+        self._default_ca = default_ca
+        self.primary_profile = CAProfile(self, ca.name, kind="ukca", primary=True)
+        self.extra_cas: "dict[str, CAProfile]" = {}
+        for name, item in (extra_cas or {}).items():
+            item._config = self
+            self.extra_cas[name] = item
+        self.keystores: "list[KeystoreLink]" = list(keystores or [])
+
+    def keystore(self, name: str) -> KeystoreLink:
+        for link in self.keystores:
+            if link.name == name:
+                return link
+        raise ConfigError(f"no keystore called '{name}' is linked (see 'pycert keystore list')")
+
+    # -- CA profiles -------------------------------------------------------
+    @property
+    def default_ca(self) -> str:
+        return self._default_ca or self.ca.name
+
+    @default_ca.setter
+    def default_ca(self, value: str) -> None:
+        self._default_ca = value
+
+    @property
+    def cas(self) -> "dict[str, CAProfile]":
+        """Every CA profile, primary first."""
+        result = {self.primary_profile.name: self.primary_profile}
+        result.update(self.extra_cas)
+        return result
+
+    def profile_for(self, name: "str | None" = "") -> CAProfile:
+        """The CA profile called *name*; an empty name means the primary CA."""
+        if not name:
+            return self.primary_profile
+        profiles = self.cas
+        if name in profiles:
+            return profiles[name]
+        raise ConfigError(
+            f"no CA profile called '{name}' is configured (known: {', '.join(profiles)}); "
+            "see 'pycert ca list'"
+        )
+
+    def default_profile(self) -> CAProfile:
+        return self.profile_for(self.default_ca)
+
+    def add_ca(self, profile: CAProfile) -> CAProfile:
+        if profile.name in self.cas:
+            raise ConfigError(f"a CA profile called '{profile.name}' already exists")
+        profile._config = self
+        self.extra_cas[profile.name] = profile
+        return profile
+
+    def remove_ca(self, name: str) -> None:
+        if name == self.primary_profile.name:
+            raise ConfigError("the primary CA ([ca]) cannot be removed; edit it instead")
+        if name not in self.extra_cas:
+            raise ConfigError(f"no CA profile called '{name}' is configured")
+        del self.extra_cas[name]
+        if self._default_ca == name:
+            self._default_ca = ""
 
     # -- paths -------------------------------------------------------------
     @property
@@ -247,53 +577,17 @@ class Config:
         return self._bundle
 
     def load_chain(self) -> ChainBundle:
-        loaded: "list[x509.Certificate]" = []
-        anchors: "list[x509.Certificate]" = []
-        sources: "list[str]" = []
-        for index, entry in enumerate(self.chain):
-            where = f"chain.certificates[{index}]"
-            if entry.pem:
-                data = entry.pem.encode()
-                source = f"inline PEM ({entry.label or 'unnamed'})"
-            else:
-                path = entry.resolved_path(self.directory)
-                if path is None:
-                    raise ConfigError(f"{where}: either 'file' or 'pem' is required")
-                if not path.is_file():
-                    raise ConfigError(f"{where}: certificate file not found: {path}")
-                data = path.read_bytes()
-                source = str(path)
-            try:
-                parsed = certs.load_certificates(data)
-            except Exception as exc:  # noqa: BLE001
-                raise ConfigError(f"{where}: {exc}") from exc
-            if entry.sha256:
-                expected = normalize_fingerprint(entry.sha256)
-                for cert in parsed:
-                    actual = certs.fingerprint(cert)
-                    if actual != expected:
-                        raise ConfigError(
-                            f"{where}: certificate fingerprint mismatch for {source}\n"
-                            f"  expected {expected}\n  actual   {actual}\n"
-                            "Refusing to use a CA certificate that does not match its pin."
-                        )
-            loaded.extend(parsed)
-            if entry.anchor:
-                anchors.extend(parsed)
-            sources.append(source)
-        if not loaded:
+        bundle = load_chain_entries(self.chain, self.directory, self.warnings)
+        if not bundle.certificates:
             self.warnings.append(
                 "no CA chain certificates are configured; TLS will use the system trust store "
                 "and chain validation will rely on AIA fetching"
             )
-        return ChainBundle(loaded, anchors, sources)
+        return bundle
 
     def tls_trust_pem(self) -> str:
-        """PEM used to verify the CA server's TLS certificate."""
-        parts: "list[str]" = []
-        if self.ca.tls_trust in ("chain", "both") and self.bundle.anchors:
-            parts.append(self.bundle.anchor_pem())
-        return "".join(parts)
+        """PEM used to verify the primary CA server's TLS certificate."""
+        return self.primary_profile.tls_trust_pem()
 
     def use_system_trust(self) -> bool:
         return self.ca.tls_trust in ("system", "both")
@@ -304,17 +598,48 @@ class Config:
 
     def invalidate_chain_cache(self) -> None:
         self._bundle = None
+        for profile in self.extra_cas.values():
+            profile._bundle = None
 
     def set(self, dotted: str, value: Any) -> None:
-        """Set a value using a dotted key (used by ``pycert config set`` and the GUI)."""
+        """Set a value using a dotted key (used by ``pycert config set`` and the GUI).
+
+        ``cas.<name>.<key>`` addresses an additional CA profile: keys of
+        ``[ca]`` (``cas.x.timeout``), its ACME settings (``cas.x.acme.http_port``
+        or the short form ``cas.x.http_port``) and ``display_name``.
+        """
         parts = dotted.split(".")
+        if dotted == "default_ca":
+            if value not in self.cas:
+                raise ConfigError(f"default_ca: no CA profile called '{value}'")
+            self._default_ca = str(value)
+            return
         target: Any = self
+        if parts[0] == "cas" and len(parts) >= 3:
+            profile = self.extra_cas.get(parts[1])
+            if profile is None:
+                raise ConfigError(f"unknown setting: {dotted} (no CA profile '{parts[1]}')")
+            if parts[2] == "display_name" and len(parts) == 3:
+                profile.display_name = str(value)
+                return
+            rest = parts[2:]
+            if rest[0] == "acme":
+                target, rest = profile.acme, rest[1:]
+            elif rest[0] == "identity":
+                if profile._identity is None:
+                    profile._identity = IdentityConfig(**vars(self.identity))
+                target, rest = profile._identity, rest[1:]
+            elif hasattr(profile.acme, rest[0]) and not hasattr(profile.ca, rest[0]):
+                target = profile.acme
+            else:
+                target = profile.ca
+            parts = rest
         for part in parts[:-1]:
             if not hasattr(target, part):
                 raise ConfigError(f"unknown setting: {dotted}")
             target = getattr(target, part)
         key = parts[-1]
-        if not hasattr(target, key):
+        if not hasattr(target, key) or isinstance(getattr(type(target), key, None), property):
             raise ConfigError(f"unknown setting: {dotted}")
         expected = type(getattr(target, key))
         try:
@@ -329,16 +654,21 @@ class Config:
                 value = _parse_list_value(dotted, value)
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"{dotted}: {exc}") from exc
+        if expected is float and isinstance(value, int) and not isinstance(value, bool):
+            value = float(value)
         if expected is not str and not isinstance(value, expected) and expected is not bool:
             raise ConfigError(f"{dotted}: expected {expected.__name__}")
         setattr(target, key, value)
-        self._bundle = None
+        self.invalidate_chain_cache()
 
     def as_dict(self) -> dict:
         return {
             "path": str(self.path),
             "profile": self.profile,
+            "default_ca": self.default_ca,
             "ca": {
+                "name": self.ca.name,
+                "display_name": self.ca.display_name,
                 "base_url": self.ca.base_url,
                 "version_string": self.ca.version_string,
                 "user_agent": self.ca.user_agent,
@@ -368,6 +698,8 @@ class Config:
                     "motd": self.ca.endpoints.motd,
                 },
             },
+            "cas": {name: profile.as_dict() for name, profile in self.cas.items()},
+            "keystores": [dict(vars(link)) for link in self.keystores],
             "identity": {
                 "c": self.identity.c,
                 "o": self.identity.o,
@@ -474,7 +806,7 @@ def default_data_dir() -> str:
 
 
 def default_config_paths() -> "list[Path]":
-    """Where pyCert looks for a configuration, in order.
+    """Where pyCertWiz looks for a configuration, in order.
 
     The current working directory is deliberately *not* searched: a pycert.toml
     planted in an untrusted directory could point the tool at an attacker's CA
@@ -485,9 +817,16 @@ def default_config_paths() -> "list[Path]":
     env = os.environ.get("PYCERT_CONFIG")
     if env:
         paths.append(_expand_path(env))
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        paths.append(Path(xdg) / "pycert" / "pycert.toml")
     paths.append(Path.home() / ".config" / "pycert" / "pycert.toml")
     paths.append(Path.home() / ".pycert" / "config.toml")
-    return paths
+    seen: "list[Path]" = []
+    for candidate in paths:
+        if candidate not in seen:
+            seen.append(candidate)
+    return seen
 
 
 def find_config(explicit: "str | Path | None" = None) -> Path:
@@ -503,64 +842,173 @@ def find_config(explicit: "str | Path | None" = None) -> Path:
     raise ConfigError(f"no configuration file found.\nSearched: {searched}\nRun 'pycert init' to create one.")
 
 
+def _parse_ca_table(ca_data: dict, where: str, *, name: str, display_name: str, tls_trust: str = "chain") -> CAConfig:
+    endpoints_data = _section(ca_data, "endpoints", f"{where}.endpoints")
+    ewhere = f"{where}.endpoints"
+    return CAConfig(
+        base_url=_get_str(ca_data, "base_url", DEFAULT_BASE_URL, where),
+        version_string=_get_str(ca_data, "version_string", DEFAULT_VERSION_STRING, where),
+        user_agent=_get_str(ca_data, "user_agent", DEFAULT_USER_AGENT, where),
+        timeout=_get_float(ca_data, "timeout", 30.0, where),
+        connect_timeout=_get_float(ca_data, "connect_timeout", 10.0, where),
+        deadline=_get_float(ca_data, "deadline", 90.0, where),
+        dns_timeout=_get_float(ca_data, "dns_timeout", 10.0, where),
+        retries=_get_int(ca_data, "retries", 2, where),
+        max_redirects=_get_int(ca_data, "max_redirects", 2, where),
+        max_body_bytes=_get_int(ca_data, "max_body_bytes", 8 * 1024 * 1024, where),
+        max_header_bytes=_get_int(ca_data, "max_header_bytes", 128 * 1024, where),
+        backoff_base=_get_float(ca_data, "backoff_base", 0.4, where),
+        backoff_cap=_get_float(ca_data, "backoff_cap", 8.0, where),
+        tls_verify=_expect_bool(ca_data, "tls_verify", True, where),
+        tls_trust=_get_str(ca_data, "tls_trust", tls_trust, where),
+        tls_pin_sha256=_expect_list(ca_data, "tls_pin_sha256", [], where),
+        allow_plaintext=_expect_bool(ca_data, "allow_plaintext", False, where),
+        allow_sha1=_expect_bool(ca_data, "allow_sha1", False, where),
+        endpoints=Endpoints(
+            csr=_get_str(endpoints_data, "csr", "/CSR", ewhere),
+            bulk=_get_str(endpoints_data, "bulk", "/CSRs", ewhere),
+            lookup=_get_str(endpoints_data, "lookup", "/resources/resource/publickey/pk", ewhere),
+            certificate=_get_str(endpoints_data, "certificate", "/certificate", ewhere),
+            revoke=_get_str(endpoints_data, "revoke", "/revoke", ewhere),
+            ping=_get_str(endpoints_data, "ping", "/pingservice", ewhere),
+            info=_get_str(endpoints_data, "info", "/CA", ewhere),
+            motd=_get_str(endpoints_data, "motd", "/CA/motd/text", ewhere),
+        ),
+        name=name,
+        display_name=display_name,
+    )
+
+
+def _parse_identity(id_data: dict, where: str, defaults: "IdentityConfig | None" = None) -> IdentityConfig:
+    base = defaults or IdentityConfig()
+    return IdentityConfig(
+        c=_get_str(id_data, "c", base.c, where),
+        o=_get_str(id_data, "o", base.o, where),
+        ou=_get_str(id_data, "ou", base.ou, where),
+        l=_get_str(id_data, "l", base.l, where),
+        st=_get_str(id_data, "st", base.st, where),
+        email=_get_str(id_data, "email", base.email, where),
+        ra=_get_str(id_data, "ra", base.ra, where),
+    )
+
+
+def _parse_chain_entries(raw_entries: Any, where_prefix: str) -> "list[ChainEntry]":
+    if not isinstance(raw_entries, list):
+        raise ConfigError(f"{where_prefix}: expected an array of tables")
+    entries: "list[ChainEntry]" = []
+    for index, raw in enumerate(raw_entries):
+        where = f"{where_prefix}[{index}]"
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{where}: expected a table")
+        entry = ChainEntry(
+            label=_get_str(raw, "label", "", where),
+            file=_get_str(raw, "file", "", where) or None,
+            pem=_get_str(raw, "pem", "", where) or None,
+            sha256=_get_str(raw, "sha256", "", where) or None,
+            anchor=_expect_bool(raw, "anchor", True, where),
+        )
+        if entry.file is None and entry.pem is None:
+            raise ConfigError(f"{where}: either 'file' or 'pem' is required")
+        if entry.file and entry.pem:
+            raise ConfigError(f"{where}: use either 'file' or 'pem', not both")
+        entries.append(entry)
+    return entries
+
+
+def _parse_acme(data: dict, where: str) -> ACMEConfig:
+    defaults = ACMEConfig()
+    return ACMEConfig(
+        contact=_expect_list(data, "contact", [], where),
+        terms_agreed=_expect_bool(data, "terms_agreed", False, where),
+        eab_kid=_get_str(data, "eab_kid", "", where),
+        eab_hmac_env=_get_str(data, "eab_hmac_env", "", where),
+        account_key=_get_str(data, "account_key", defaults.account_key, where).lower(),
+        challenge=_get_str(data, "challenge", defaults.challenge, where).lower(),
+        http_mode=_get_str(data, "http_mode", defaults.http_mode, where).lower(),
+        http_port=_get_int(data, "http_port", defaults.http_port, where),
+        http_bind=_get_str(data, "http_bind", "", where),
+        webroot=_get_str(data, "webroot", "", where),
+        dns_hook=_get_str(data, "dns_hook", "", where),
+        dns_propagation_seconds=_get_float(data, "dns_propagation_seconds", 0.0, where),
+        validation_timeout=_get_float(data, "validation_timeout", defaults.validation_timeout, where),
+        poll_interval=_get_float(data, "poll_interval", defaults.poll_interval, where),
+    )
+
+
+# Keys of a [cas.<name>] table that are not CAConfig settings ([cas.<name>.endpoints] is one).
+_PROFILE_META_KEYS = {"kind", "display_name", "identity", "chain", "directory"}
+_ACME_KEYS = set(ACMEConfig.__dataclass_fields__)
+
+
+def _parse_extra_ca(name: str, data: Any, identity: IdentityConfig) -> CAProfile:
+    where = f"cas.{name}"
+    if not isinstance(data, dict):
+        raise ConfigError(f"{where}: expected a table")
+    if not PROFILE_NAME_RE.match(name):
+        raise ConfigError(
+            f"{where}: CA profile names must be lower-case letters, digits, '.', '-' or '_' (got {name!r})"
+        )
+    kind = _get_str(data, "kind", "ukca", where).lower()
+    display_name = _get_str(data, "display_name", "", where)
+    if kind == "acme":
+        directory = _get_str(data, "directory", "", where) or _get_str(data, "base_url", "", where)
+        if not directory:
+            raise ConfigError(f"{where}.directory: the ACME directory URL is required")
+        ca_table = {k: v for k, v in data.items() if k not in _ACME_KEYS and k not in _PROFILE_META_KEYS}
+        ca_table["base_url"] = directory
+        ca = _parse_ca_table(ca_table, where, name=name, display_name=display_name, tls_trust="system")
+        acme = _parse_acme({k: v for k, v in data.items() if k in _ACME_KEYS}, where)
+        own_identity = None
+    else:
+        ca_table = {k: v for k, v in data.items() if k not in _PROFILE_META_KEYS}
+        ca = _parse_ca_table(ca_table, where, name=name, display_name=display_name)
+        acme = ACMEConfig()
+        own_identity = (
+            _parse_identity(_section(data, "identity", f"{where}.identity"), f"{where}.identity", identity)
+            if "identity" in data
+            else None
+        )
+    chain = _parse_chain_entries(data.get("chain", []), f"{where}.chain")
+    return CAProfile(
+        None,  # type: ignore[arg-type] - attached by Config
+        name,
+        kind=kind,
+        display_name=display_name,
+        ca=ca,
+        chain=chain,
+        identity=own_identity,
+        acme=acme,
+    )
+
+
 def load_config(explicit: "str | Path | None" = None) -> Config:
     path = find_config(explicit)
     try:
+        if path.stat().st_size > MAX_CONFIG_BYTES:
+            raise ConfigError(f"{path}: configuration file is larger than {MAX_CONFIG_BYTES} bytes")
         data = toml_loads(path.read_text(encoding="utf-8"))
     except TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
-    except OSError as exc:
+    except RecursionError as exc:
+        raise ConfigError(f"{path}: invalid TOML: values are nested too deeply") from exc
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
 
     warnings: "list[str]" = []
     version = data.get("version", 1)
-    if version != CONFIG_VERSION:
+    if version not in SUPPORTED_CONFIG_VERSIONS:
         warnings.append(f"configuration version {version} is not the supported version {CONFIG_VERSION}")
     profile = str(data.get("profile", "default"))
 
     ca_data = _section(data, "ca", "ca")
-    endpoints_data = _section(ca_data, "endpoints", "ca.endpoints")
-    ca = CAConfig(
-        base_url=_get_str(ca_data, "base_url", DEFAULT_BASE_URL, "ca"),
-        version_string=_get_str(ca_data, "version_string", DEFAULT_VERSION_STRING, "ca"),
-        user_agent=_get_str(ca_data, "user_agent", DEFAULT_USER_AGENT, "ca"),
-        timeout=_get_float(ca_data, "timeout", 30.0, "ca"),
-        connect_timeout=_get_float(ca_data, "connect_timeout", 10.0, "ca"),
-        deadline=_get_float(ca_data, "deadline", 90.0, "ca"),
-        dns_timeout=_get_float(ca_data, "dns_timeout", 10.0, "ca"),
-        retries=_get_int(ca_data, "retries", 2, "ca"),
-        max_redirects=_get_int(ca_data, "max_redirects", 2, "ca"),
-        max_body_bytes=_get_int(ca_data, "max_body_bytes", 8 * 1024 * 1024, "ca"),
-        max_header_bytes=_get_int(ca_data, "max_header_bytes", 128 * 1024, "ca"),
-        backoff_base=_get_float(ca_data, "backoff_base", 0.4, "ca"),
-        backoff_cap=_get_float(ca_data, "backoff_cap", 8.0, "ca"),
-        tls_verify=_expect_bool(ca_data, "tls_verify", True, "ca"),
-        tls_trust=_get_str(ca_data, "tls_trust", "chain", "ca"),
-        tls_pin_sha256=_expect_list(ca_data, "tls_pin_sha256", [], "ca"),
-        allow_plaintext=_expect_bool(ca_data, "allow_plaintext", False, "ca"),
-        allow_sha1=_expect_bool(ca_data, "allow_sha1", False, "ca"),
-        endpoints=Endpoints(
-            csr=_get_str(endpoints_data, "csr", "/CSR", "ca.endpoints"),
-            bulk=_get_str(endpoints_data, "bulk", "/CSRs", "ca.endpoints"),
-            lookup=_get_str(endpoints_data, "lookup", "/resources/resource/publickey/pk", "ca.endpoints"),
-            certificate=_get_str(endpoints_data, "certificate", "/certificate", "ca.endpoints"),
-            revoke=_get_str(endpoints_data, "revoke", "/revoke", "ca.endpoints"),
-            ping=_get_str(endpoints_data, "ping", "/pingservice", "ca.endpoints"),
-            info=_get_str(endpoints_data, "info", "/CA", "ca.endpoints"),
-            motd=_get_str(endpoints_data, "motd", "/CA/motd/text", "ca.endpoints"),
-        ),
+    ca = _parse_ca_table(
+        ca_data,
+        "ca",
+        name=_get_str(ca_data, "name", DEFAULT_CA_NAME, "ca") or DEFAULT_CA_NAME,
+        display_name=_get_str(ca_data, "display_name", DEFAULT_CA_DISPLAY_NAME, "ca"),
     )
 
-    id_data = _section(data, "identity", "identity")
-    identity = IdentityConfig(
-        c=_get_str(id_data, "c", "UK", "identity"),
-        o=_get_str(id_data, "o", "eScience", "identity"),
-        ou=_get_str(id_data, "ou", "CLRC", "identity"),
-        l=_get_str(id_data, "l", "DL", "identity"),
-        st=_get_str(id_data, "st", "", "identity"),
-        email=_get_str(id_data, "email", "", "identity"),
-        ra=_get_str(id_data, "ra", "", "identity"),
-    )
+    identity = _parse_identity(_section(data, "identity", "identity"), "identity")
 
     keys_data = _section(data, "keys", "keys")
     keys = KeyConfig(
@@ -600,26 +1048,31 @@ def load_config(explicit: "str | Path | None" = None) -> Config:
     )
 
     chain_data = _section(data, "chain", "chain")
-    entries: "list[ChainEntry]" = []
-    raw_entries = chain_data.get("certificates", [])
-    if not isinstance(raw_entries, list):
-        raise ConfigError("chain.certificates: expected an array of tables")
-    for index, raw in enumerate(raw_entries):
-        where = f"chain.certificates[{index}]"
+    entries = _parse_chain_entries(chain_data.get("certificates", []), "chain.certificates")
+
+    extra: "dict[str, CAProfile]" = {}
+    for name, table in _section(data, "cas", "cas").items():
+        if name == ca.name:
+            raise ConfigError(f"cas.{name}: this name is already used by the primary CA ([ca] name)")
+        extra[name] = _parse_extra_ca(name, table, identity)
+
+    raw_keystores = data.get("keystores", [])
+    if not isinstance(raw_keystores, list):
+        raise ConfigError("keystores: expected an array of tables ([[keystores]])")
+    links: "list[KeystoreLink]" = []
+    for index, raw in enumerate(raw_keystores):
+        where = f"keystores[{index}]"
         if not isinstance(raw, dict):
             raise ConfigError(f"{where}: expected a table")
-        entry = ChainEntry(
-            label=_get_str(raw, "label", "", where),
-            file=_get_str(raw, "file", "", where) or None,
-            pem=_get_str(raw, "pem", "", where) or None,
-            sha256=_get_str(raw, "sha256", "", where) or None,
-            anchor=_expect_bool(raw, "anchor", True, where),
+        links.append(
+            KeystoreLink(
+                name=_get_str(raw, "name", "", where),
+                path=_get_str(raw, "path", "", where),
+                ca=_get_str(raw, "ca", "", where),
+                auto_import=_expect_bool(raw, "auto_import", True, where),
+                write_back=_expect_bool(raw, "write_back", True, where),
+            )
         )
-        if entry.file is None and entry.pem is None:
-            raise ConfigError(f"{where}: either 'file' or 'pem' is required")
-        if entry.file and entry.pem:
-            raise ConfigError(f"{where}: use either 'file' or 'pem', not both")
-        entries.append(entry)
 
     config = Config(
         path=path,
@@ -633,6 +1086,9 @@ def load_config(explicit: "str | Path | None" = None) -> Config:
         secrets=secrets,
         chain=entries,
         warnings=warnings,
+        default_ca=_get_str(data, "default_ca", "", "default_ca"),
+        extra_cas=extra,
+        keystores=links,
     )
     _validate(config)
     return config
@@ -643,49 +1099,79 @@ def validate_config(config: Config) -> None:
     _validate(config)
 
 
-def _validate(config: Config) -> None:
-    if config.ca.tls_trust not in ("chain", "system", "both"):
-        raise ConfigError("ca.tls_trust must be 'chain', 'system' or 'both'")
-    if not 0 < config.ca.timeout <= 300:
-        raise ConfigError("ca.timeout must be between 0 and 300 seconds")
-    if not 0 < config.ca.connect_timeout <= 300:
-        raise ConfigError("ca.connect_timeout must be between 0 and 300 seconds")
-    if not 0 < config.ca.deadline <= 3600:
-        raise ConfigError("ca.deadline must be between 0 and 3600 seconds")
-    if not 0 < config.ca.dns_timeout <= 120:
-        raise ConfigError("ca.dns_timeout must be between 0 and 120 seconds")
-    if not 0 <= config.ca.retries <= 10:
-        raise ConfigError("ca.retries must be between 0 and 10")
-    if not 0 <= config.ca.max_redirects <= 10:
-        raise ConfigError("ca.max_redirects must be between 0 and 10")
-    if not 1024 <= config.ca.max_body_bytes <= 64 * 1024 * 1024:
-        raise ConfigError("ca.max_body_bytes must be between 1 KiB and 64 MiB")
-    if not 1024 <= config.ca.max_header_bytes <= 1024 * 1024:
-        raise ConfigError("ca.max_header_bytes must be between 1 KiB and 1 MiB")
-    if not 0 <= config.ca.backoff_base <= 10:
-        raise ConfigError("ca.backoff_base must be between 0 and 10 seconds")
-    if not 0 < config.ca.backoff_cap <= 60:
-        raise ConfigError("ca.backoff_cap must be between 0 and 60 seconds")
-    if config.ca.deadline < config.ca.timeout:
-        config.warnings.append(
-            "ca.deadline is smaller than ca.timeout; a slow response may hit the deadline first"
-        )
-    if not config.ca.tls_verify:
-        config.warnings.append("ca.tls_verify = false: the CA server's TLS certificate will NOT be verified")
-    if config.ca.allow_plaintext:
-        config.warnings.append(
-            "ca.allow_plaintext is enabled: HTTP traffic is not confidential or authenticated"
-        )
-    if config.ca.base_url.startswith("http://") and not config.ca.allow_plaintext:
+def _validate_ca(ca: CAConfig, where: str, warnings: "list[str]") -> None:
+    if ca.tls_trust not in ("chain", "system", "both"):
+        raise ConfigError(f"{where}.tls_trust must be 'chain', 'system' or 'both'")
+    if not 0 < ca.timeout <= 300:
+        raise ConfigError(f"{where}.timeout must be between 0 and 300 seconds")
+    if not 0 < ca.connect_timeout <= 300:
+        raise ConfigError(f"{where}.connect_timeout must be between 0 and 300 seconds")
+    if not 0 < ca.deadline <= 3600:
+        raise ConfigError(f"{where}.deadline must be between 0 and 3600 seconds")
+    if not 0 < ca.dns_timeout <= 120:
+        raise ConfigError(f"{where}.dns_timeout must be between 0 and 120 seconds")
+    if not 0 <= ca.retries <= 10:
+        raise ConfigError(f"{where}.retries must be between 0 and 10")
+    if not 0 <= ca.max_redirects <= 10:
+        raise ConfigError(f"{where}.max_redirects must be between 0 and 10")
+    if not 1024 <= ca.max_body_bytes <= 64 * 1024 * 1024:
+        raise ConfigError(f"{where}.max_body_bytes must be between 1 KiB and 64 MiB")
+    if not 1024 <= ca.max_header_bytes <= 1024 * 1024:
+        raise ConfigError(f"{where}.max_header_bytes must be between 1 KiB and 1 MiB")
+    if not 0 <= ca.backoff_base <= 10:
+        raise ConfigError(f"{where}.backoff_base must be between 0 and 10 seconds")
+    if not 0 < ca.backoff_cap <= 60:
+        raise ConfigError(f"{where}.backoff_cap must be between 0 and 60 seconds")
+    if ca.deadline < ca.timeout:
+        warnings.append(f"{where}.deadline is smaller than {where}.timeout; a slow response may hit the deadline first")
+    if not ca.tls_verify:
+        warnings.append(f"{where}.tls_verify = false: the CA server's TLS certificate will NOT be verified")
+    if ca.allow_plaintext:
+        warnings.append(f"{where}.allow_plaintext is enabled: HTTP traffic is not confidential or authenticated")
+    if ca.base_url.startswith("http://") and not ca.allow_plaintext:
         raise ConfigError(
-            "ca.base_url uses http:// but ca.allow_plaintext is false.\n"
-            "Use https:// or explicitly set ca.allow_plaintext = true."
+            f"{where}.base_url uses http:// but {where}.allow_plaintext is false.\n"
+            f"Use https:// or explicitly set {where}.allow_plaintext = true."
         )
-    if not re.match(r"^https?://[^/\s]+", config.ca.base_url):
-        raise ConfigError(f"ca.base_url is not a valid URL: {config.ca.base_url!r}")
-    for value in config.ca.tls_pin_sha256:
+    if not re.match(r"^https?://[^/\s]+", ca.base_url):
+        raise ConfigError(f"{where}.base_url is not a valid URL: {ca.base_url!r}")
+    for value in ca.tls_pin_sha256:
         if len(normalize_fingerprint(value)) != 64:
-            raise ConfigError(f"ca.tls_pin_sha256: not a SHA-256 fingerprint: {value!r}")
+            raise ConfigError(f"{where}.tls_pin_sha256: not a SHA-256 fingerprint: {value!r}")
+
+
+def _validate_acme(profile: CAProfile) -> None:
+    where = f"cas.{profile.name}"
+    acme = profile.acme
+    if acme.challenge not in ACME_CHALLENGES:
+        raise ConfigError(f"{where}.challenge must be one of {', '.join(ACME_CHALLENGES)}")
+    if acme.http_mode not in ACME_HTTP_MODES:
+        raise ConfigError(f"{where}.http_mode must be one of {', '.join(ACME_HTTP_MODES)}")
+    if acme.account_key not in ACME_ACCOUNT_KEYS:
+        raise ConfigError(f"{where}.account_key must be 'ec' or 'rsa'")
+    if not 1 <= acme.http_port <= 65535:
+        raise ConfigError(f"{where}.http_port must be between 1 and 65535")
+    if acme.challenge == "http-01" and acme.http_mode == "webroot" and not acme.webroot:
+        raise ConfigError(f"{where}.webroot is required when http_mode = 'webroot'")
+    if not 0 <= acme.dns_propagation_seconds <= 3600:
+        raise ConfigError(f"{where}.dns_propagation_seconds must be between 0 and 3600")
+    if not 1 <= acme.validation_timeout <= 86400:
+        raise ConfigError(f"{where}.validation_timeout must be between 1 and 86400 seconds")
+    if not 0.1 <= acme.poll_interval <= 600:
+        raise ConfigError(f"{where}.poll_interval must be between 0.1 and 600 seconds")
+    for contact in acme.contact:
+        if "@" not in contact or any(ch in contact for ch in " \t\r\n,"):
+            raise ConfigError(f"{where}.contact: not an e-mail address: {contact!r}")
+    if acme.eab_hmac_env and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", acme.eab_hmac_env):
+        raise ConfigError(f"{where}.eab_hmac_env must be an environment variable name")
+
+
+def _validate(config: Config) -> None:
+    _validate_ca(config.ca, "ca", config.warnings)
+    if not PROFILE_NAME_RE.match(config.ca.name):
+        raise ConfigError(
+            "ca.name must be lower-case letters, digits, '.', '-' or '_' (e.g. 'uk-escience')"
+        )
     if len(config.identity.c) != 2:
         raise ConfigError("identity.c must be a two-letter country code")
     if config.keys.algorithm not in ("rsa", "ec"):
@@ -711,22 +1197,47 @@ def _validate(config: Config) -> None:
             "p12.filename_template must contain {cn} or {alias} so certificates cannot "
             "silently overwrite each other (use 'pycert export --out' for a fixed name)"
         )
-    if config.secrets.backend not in (
-        "auto",
-        "keychain",
-        "secret-service",
-        "file",
-        "command",
-        "env",
-        "prompt",
-    ):
-        raise ConfigError(
-            "secrets.backend must be one of auto, keychain, secret-service, file, command, env, prompt"
-        )
+    from .secrets_store import BACKENDS
+
+    if config.secrets.backend not in BACKENDS:
+        raise ConfigError("secrets.backend must be one of " + ", ".join(BACKENDS))
     if config.secrets.backend == "command" and not config.secrets.command:
         raise ConfigError("secrets.command is required when secrets.backend = 'command'")
     if not 0 < config.secrets.command_timeout <= 300:
         raise ConfigError("secrets.command_timeout must be between 0 and 300 seconds")
+
+    from .providers import known_kinds
+
+    kinds = known_kinds()
+    for name, profile in config.extra_cas.items():
+        where = f"cas.{name}"
+        if profile.kind not in kinds:
+            raise ConfigError(
+                f"{where}.kind: unknown CA kind {profile.kind!r} (available: {', '.join(sorted(kinds))})"
+            )
+        _validate_ca(profile.ca, where, config.warnings)
+        if profile.kind == "acme":
+            _validate_acme(profile)
+        if profile.own_identity is not None and len(profile.own_identity.c) != 2:
+            raise ConfigError(f"{where}.identity.c must be a two-letter country code")
+    if config.default_ca not in config.cas:
+        raise ConfigError(
+            f"default_ca: no CA profile called '{config.default_ca}' (known: {', '.join(config.cas)})"
+        )
+    names: "set[str]" = set()
+    for index, link in enumerate(config.keystores):
+        where = f"keystores[{index}]"
+        if not PROFILE_NAME_RE.match(link.name):
+            raise ConfigError(f"{where}.name must be lower-case letters, digits, '.', '-' or '_' (got {link.name!r})")
+        if link.name in names:
+            raise ConfigError(f"{where}.name: a keystore called '{link.name}' is already linked")
+        names.add(link.name)
+        if not link.path:
+            raise ConfigError(f"{where}.path: the keystore file is required")
+        if link.ca and link.ca not in config.cas:
+            raise ConfigError(f"{where}.ca: no CA profile called '{link.ca}'")
+        if "password" in vars(link):  # pragma: no cover - guards against a future field
+            raise ConfigError(f"{where}: keystore passphrases are never stored in the configuration")
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +1245,7 @@ def _validate(config: Config) -> None:
 # ---------------------------------------------------------------------------
 
 _HEADER = """\
-# pyCert configuration - generated by 'pycert init'
+# pyCertWiz configuration - generated by 'pycert init'
 #
 # Review before use.  No secrets belong in this file: the PKCS#12 passphrase is
 # kept in the OS secret store (or a 0600 file, or an external command), see
@@ -752,12 +1263,127 @@ def _toml_list(values: Sequence[str]) -> str:
     return "[" + ", ".join(_q(v) for v in values) + "]"
 
 
+def _num(value: float) -> str:
+    return repr(float(value))
+
+
+def _render_ca_keys(lines: "list[str]", ca: CAConfig, *, defaults: "CAConfig | None" = None, full: bool = True) -> None:
+    """Append ``key = value`` lines for a CAConfig (all keys, or only non-defaults)."""
+    base = defaults or CAConfig()
+    pairs = [
+        ("version_string", _q(ca.version_string), ca.version_string != base.version_string),
+        ("user_agent", _q(ca.user_agent), ca.user_agent != base.user_agent),
+        ("timeout", _num(ca.timeout), ca.timeout != base.timeout),
+        ("connect_timeout", _num(ca.connect_timeout), ca.connect_timeout != base.connect_timeout),
+        ("deadline", _num(ca.deadline), ca.deadline != base.deadline),
+        ("dns_timeout", _num(ca.dns_timeout), ca.dns_timeout != base.dns_timeout),
+        ("retries", str(ca.retries), ca.retries != base.retries),
+        ("max_redirects", str(ca.max_redirects), ca.max_redirects != base.max_redirects),
+        ("max_body_bytes", str(ca.max_body_bytes), ca.max_body_bytes != base.max_body_bytes),
+        ("max_header_bytes", str(ca.max_header_bytes), ca.max_header_bytes != base.max_header_bytes),
+        ("backoff_base", _num(ca.backoff_base), ca.backoff_base != base.backoff_base),
+        ("backoff_cap", _num(ca.backoff_cap), ca.backoff_cap != base.backoff_cap),
+        ("tls_verify", str(ca.tls_verify).lower(), ca.tls_verify != base.tls_verify),
+        ("tls_trust", _q(ca.tls_trust), ca.tls_trust != base.tls_trust),
+        ("tls_pin_sha256", _toml_list(ca.tls_pin_sha256), bool(ca.tls_pin_sha256)),
+        ("allow_plaintext", str(ca.allow_plaintext).lower(), ca.allow_plaintext != base.allow_plaintext),
+        ("allow_sha1", str(ca.allow_sha1).lower(), ca.allow_sha1 != base.allow_sha1),
+    ]
+    for key, rendered, changed in pairs:
+        if full or changed:
+            lines.append(f"{key} = {rendered}")
+
+
+def _render_endpoints(lines: "list[str]", header: str, endpoints: Endpoints, *, full: bool = True) -> None:
+    base = Endpoints()
+    changed = [(k, getattr(endpoints, k)) for k in vars(base) if getattr(endpoints, k) != getattr(base, k)]
+    if not full and not changed:
+        return
+    lines.append("")
+    lines.append(f"[{header}]")
+    for key in vars(base):
+        value = getattr(endpoints, key)
+        if full or value != getattr(base, key):
+            lines.append(f"{key} = {_q(value)}")
+
+
+def _render_chain_entry(lines: "list[str]", header: str, entry: ChainEntry) -> None:
+    lines.append("")
+    lines.append(f"[[{header}]]")
+    if entry.label:
+        lines.append(f"label = {_q(entry.label)}")
+    if entry.pem:
+        lines.append("pem = '''")
+        lines.append(entry.pem.strip())
+        lines.append("'''")
+    else:
+        lines.append(f"file = {_q(entry.file or '')}")
+    if entry.sha256:
+        lines.append(f"sha256 = {_q(entry.sha256)}")
+    if not entry.anchor:
+        lines.append("anchor = false")
+
+
+def _render_extra_ca(lines: "list[str]", profile: CAProfile, global_identity: IdentityConfig) -> None:
+    name = profile.name
+    lines.append("")
+    lines.append(f"[cas.{name}]")
+    lines.append(f"kind = {_q(profile.kind)}")
+    if profile._display_name:
+        lines.append(f"display_name = {_q(profile._display_name)}")
+    if profile.kind == "acme":
+        lines.append(f"directory = {_q(profile.ca.base_url)}")
+        acme, base = profile.acme, ACMEConfig()
+        lines.append(f"contact = {_toml_list(acme.contact)}")
+        lines.append("# You must accept the CA's terms of service before an account can be registered.")
+        lines.append(f"terms_agreed = {str(acme.terms_agreed).lower()}")
+        lines.append("# External Account Binding: the HMAC key lives in the secret store ('pycert ca eab').")
+        lines.append(f"eab_kid = {_q(acme.eab_kid)}")
+        if acme.eab_hmac_env:
+            lines.append(f"eab_hmac_env = {_q(acme.eab_hmac_env)}")
+        lines.append(f"account_key = {_q(acme.account_key)}")
+        lines.append("# http-01 (standalone listener or webroot) or dns-01 (hook command, or manual).")
+        lines.append(f"challenge = {_q(acme.challenge)}")
+        lines.append(f"http_mode = {_q(acme.http_mode)}")
+        lines.append(f"http_port = {acme.http_port}")
+        if acme.http_bind:
+            lines.append(f"http_bind = {_q(acme.http_bind)}")
+        lines.append(f"webroot = {_q(acme.webroot)}")
+        lines.append(f"dns_hook = {_q(acme.dns_hook)}")
+        if acme.dns_propagation_seconds != base.dns_propagation_seconds:
+            lines.append(f"dns_propagation_seconds = {_num(acme.dns_propagation_seconds)}")
+        if acme.validation_timeout != base.validation_timeout:
+            lines.append(f"validation_timeout = {_num(acme.validation_timeout)}")
+        if acme.poll_interval != base.poll_interval:
+            lines.append(f"poll_interval = {_num(acme.poll_interval)}")
+        _render_ca_keys(lines, profile.ca, defaults=CAConfig(tls_trust="system"), full=False)
+    else:
+        lines.append(f"base_url = {_q(profile.ca.base_url)}")
+        _render_ca_keys(lines, profile.ca, full=False)
+    _render_endpoints(lines, f"cas.{name}.endpoints", profile.ca.endpoints, full=False)
+    identity = profile.own_identity
+    if identity is not None:
+        lines.append("")
+        lines.append(f"[cas.{name}.identity]")
+        for key in ("c", "o", "ou", "l", "st", "email", "ra"):
+            value = getattr(identity, key)
+            if value != getattr(global_identity, key) or key == "ra":
+                lines.append(f"{key} = {_q(value)}")
+    for entry in profile.chain:
+        _render_chain_entry(lines, f"cas.{name}.chain", entry)
+
+
 def render_config(config: Config, *, chain_comments: bool = True) -> str:
     lines: "list[str]" = [_HEADER]
     lines.append(f"version = {CONFIG_VERSION}")
     lines.append(f"profile = {_q(config.profile)}")
+    lines.append("# CA profile used for new requests when --ca is not given ('pycert ca list').")
+    lines.append(f"default_ca = {_q(config.default_ca)}")
     lines.append("")
     lines.append("[ca]")
+    lines.append("# The primary CA: the UK e-Science CA (CertWizard protocol) by default.")
+    lines.append(f"name = {_q(config.ca.name)}")
+    lines.append(f"display_name = {_q(config.ca.display_name)}")
     lines.append(f"base_url = {_q(config.ca.base_url)}")
     lines.append("# Version string sent to the CA; it must match what the server expects.")
     lines.append(f"version_string = {_q(config.ca.version_string)}")
@@ -833,7 +1459,7 @@ def render_config(config: Config, *, chain_comments: bool = True) -> str:
     lines.append("")
     lines.append("[secrets]")
     lines.append("# Where the saved PKCS#12/key passphrase lives:")
-    lines.append("#   auto | keychain (macOS) | secret-service (Linux) | file | command | env | prompt")
+    lines.append("#   auto | keychain (macOS) | secret-service (Linux) | keyring | file | command | env | prompt")
     lines.append(f"backend = {_q(config.secrets.backend)}")
     lines.append(f"service = {_q(config.secrets.service)}")
     lines.append(f"account = {_q(config.secrets.account)}")
@@ -850,20 +1476,26 @@ def render_config(config: Config, *, chain_comments: bool = True) -> str:
     lines.append("# Each entry is a file path (relative to this file) or an inline 'pem' string,")
     lines.append("# optionally pinned with the SHA-256 fingerprint of the certificate.")
     for entry in config.chain:
+        _render_chain_entry(lines, "chain.certificates", entry)
+    for link in config.keystores:
         lines.append("")
-        lines.append("[[chain.certificates]]")
-        if entry.label:
-            lines.append(f"label = {_q(entry.label)}")
-        if entry.pem:
-            lines.append("pem = '''")
-            lines.append(entry.pem.strip())
-            lines.append("'''")
-        else:
-            lines.append(f"file = {_q(entry.file or '')}")
-        if entry.sha256:
-            lines.append(f"sha256 = {_q(entry.sha256)}")
-        if not entry.anchor:
-            lines.append("anchor = false")
+        lines.append("[[keystores]]")
+        lines.append("# A Java PKCS#12 keystore kept in step with pyCertWiz ('pycert keystore ...').")
+        lines.append("# Its passphrase is never stored: pyCertWiz asks for it in each session.")
+        lines.append(f"name = {_q(link.name)}")
+        lines.append(f"path = {_q(link.path)}")
+        if link.ca:
+            lines.append(f"ca = {_q(link.ca)}")
+        lines.append(f"auto_import = {str(link.auto_import).lower()}")
+        lines.append(f"write_back = {str(link.write_back).lower()}")
+    if config.extra_cas:
+        lines.append("")
+        lines.append("# ---------------------------------------------------------------------------")
+        lines.append("# Additional CA profiles ('pycert ca list').  kind = 'ukca' speaks the")
+        lines.append("# CertWizard protocol; kind = 'acme' is an RFC 8555 ACME CA.")
+        lines.append("# ---------------------------------------------------------------------------")
+        for profile in config.extra_cas.values():
+            _render_extra_ca(lines, profile, config.identity)
     lines.append("")
     return "\n".join(lines)
 
@@ -904,6 +1536,62 @@ def bundle_chain_entries() -> "list[ChainEntry]":
         ChainEntry(label=_BUNDLED_LABELS.get(name, name), file=f"chain/{name}", sha256=pin)
         for name, pin in bundled.PINNED.items()
     ]
+
+
+def new_acme_profile(
+    name: str,
+    directory: str,
+    *,
+    display_name: str = "",
+    contact: "Sequence[str]" = (),
+    eab_kid: str = "",
+    challenge: str = "http-01",
+    http_mode: str = "standalone",
+    webroot: str = "",
+    http_port: int = 80,
+    dns_hook: str = "",
+    terms_agreed: bool = False,
+    tls_trust: str = "system",
+) -> CAProfile:
+    """Build an ACME CA profile (validate with :func:`validate_config` after adding it)."""
+    if not PROFILE_NAME_RE.match(name):
+        raise ConfigError(f"invalid CA profile name {name!r}: use lower-case letters, digits, '.', '-' or '_'")
+    ca = CAConfig(base_url=directory, tls_trust=tls_trust, name=name, display_name=display_name)
+    acme = ACMEConfig(
+        contact=list(contact),
+        terms_agreed=terms_agreed,
+        eab_kid=eab_kid,
+        challenge=challenge,
+        http_mode=http_mode,
+        webroot=webroot,
+        http_port=http_port,
+        dns_hook=dns_hook,
+    )
+    return CAProfile(None, name, kind="acme", display_name=display_name, ca=ca, acme=acme)  # type: ignore[arg-type]
+
+
+def new_ukca_profile(
+    name: str,
+    base_url: str,
+    *,
+    display_name: str = "",
+    chain: "Sequence[ChainEntry]" = (),
+    tls_trust: str = "chain",
+    identity: "IdentityConfig | None" = None,
+) -> CAProfile:
+    """Build an additional CertWizard-protocol CA profile."""
+    if not PROFILE_NAME_RE.match(name):
+        raise ConfigError(f"invalid CA profile name {name!r}: use lower-case letters, digits, '.', '-' or '_'")
+    ca = CAConfig(base_url=base_url, tls_trust=tls_trust, name=name, display_name=display_name)
+    return CAProfile(
+        None,  # type: ignore[arg-type]
+        name,
+        kind="ukca",
+        display_name=display_name,
+        ca=ca,
+        chain=list(chain),
+        identity=identity,
+    )
 
 
 def init_config(directory: Path, profile: str = "default", *, copy_chain: bool = True) -> Config:

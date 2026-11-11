@@ -13,13 +13,13 @@ import stat
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import __version__, bundled, certs, chain
 from . import csr as csr_module
 from . import p12 as p12_module
-from .compat import dataclass
 
 OK = "ok"
 WARN = "warn"
@@ -48,20 +48,12 @@ def run_doctor(ctx, *, offline=False):
     """Return a list of :class:`Check` results for the configured installation."""
     results = []
     config = ctx.config
-    results.append(_result("pyCert version", OK, __version__))
+    results.append(_result("pyCertWiz version", OK, __version__))
     results.append(_result("Python", OK, "%d.%d.%d" % tuple(sys.version_info[:3])))
     try:
         import cryptography
 
         results.append(_result("cryptography", OK, cryptography.__version__))
-        if sys.version_info[:2] == (3, 6):
-            results.append(
-                _result(
-                    "Python 3.6 support",
-                    WARN,
-                    "3.6 is end-of-life and caps cryptography at 3.3.x; prefer a newer Python",
-                )
-            )
     except Exception as exc:  # noqa: BLE001
         results.append(_result("cryptography", FAIL, str(exc)))
 
@@ -171,10 +163,24 @@ def run_doctor(ctx, *, offline=False):
     except Exception as exc:  # noqa: BLE001
         results.append(_result("saved secret", FAIL, str(exc)))
 
+    deployed = [state for state in ctx.store.list() if state.deploy]
+    if deployed:
+        from .deploy import check_drift
+
+        drift = [
+            "%s/%s: %s" % (state.alias, item.target, item.problem)
+            for state in deployed
+            for item in check_drift(ctx, state)
+        ]
+        if drift:
+            results.append(_result("deployments", WARN, "; ".join(drift[:5])))
+        else:
+            results.append(_result("deployments", OK, "%d certificate(s) deployed and up to date" % len(deployed)))
+
     for variable in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         if os.environ.get(variable):
             results.append(
-                _result("proxy environment", WARN, "%s is set but pyCert does not use proxies" % variable)
+                _result("proxy environment", WARN, "%s is set but pyCertWiz does not use proxies" % variable)
             )
             break
 
@@ -187,6 +193,7 @@ def run_doctor(ctx, *, offline=False):
     started = time.time()
     if not client.ping():
         results.append(_result("CA connectivity", FAIL, client.last_error or "no response"))
+        _check_other_cas(ctx, results)
         return results
     results.append(_result("CA connectivity", OK, "%.0f ms" % ((time.time() - started) * 1000)))
     try:
@@ -236,7 +243,23 @@ def run_doctor(ctx, *, offline=False):
         results.append(_result("DNS", OK, "%d address(es) for %s" % (len(addresses), parts.hostname)))
     except Exception as exc:  # noqa: BLE001
         results.append(_result("DNS", FAIL, str(exc)))
+    _check_other_cas(ctx, results)
     return results
+
+
+def _check_other_cas(ctx, results):
+    """Reachability of every additional CA profile (ACME directories, other CertWizard CAs)."""
+    for name, profile in ctx.config.extra_cas.items():
+        label = "CA '%s'" % name
+        try:
+            outcome = ctx.provider(name).ping()
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            results.append(_result(label, FAIL, str(exc)))
+            continue
+        if outcome.ok:
+            results.append(_result(label, OK, "%s reachable (%.0f ms)" % (profile.ca.base_url, outcome.latency_ms)))
+        else:
+            results.append(_result(label, FAIL, outcome.detail or "no response from %s" % profile.ca.base_url))
 
 
 def run_selftest():
@@ -247,10 +270,10 @@ def run_selftest():
 
     # TOML parser ------------------------------------------------------------
     try:
-        from .toml import loads
+        from .config import toml_loads
 
         doc = 'a = 1\n[t]\nb = ["x", true]\n'
-        assert loads(doc) == {"a": 1, "t": {"b": ["x", True]}}
+        assert toml_loads(doc) == {"a": 1, "t": {"b": ["x", True]}}
         results.append(_result("TOML parser", OK, "round-trip"))
     except Exception as exc:  # noqa: BLE001
         results.append(_result("TOML parser", FAIL, str(exc)))

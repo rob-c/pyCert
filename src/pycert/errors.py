@@ -1,13 +1,13 @@
-"""Exception hierarchy for pyCert.
+"""Exception hierarchy for pyCertWiz.
 
-Every error raised deliberately by pyCert derives from :class:`PyCertError`, so
+Every error raised deliberately by pyCertWiz derives from :class:`PyCertError`, so
 the CLI can print a one-line message (and a traceback only with ``--debug``) and
 the GUI can show a clean dialog.  Unexpected exceptions are never swallowed.
 """
 
 
 class PyCertError(Exception):
-    """Base class for all pyCert errors."""
+    """Base class for all pyCertWiz errors."""
 
 
 class ConfigError(PyCertError):
@@ -27,7 +27,7 @@ class UnsupportedAlgorithm(CryptoError):
 
 
 class ProtocolError(PyCertError):
-    """The CA server returned something pyCert cannot understand."""
+    """The CA server returned something pyCertWiz cannot understand."""
 
 
 class NetworkError(PyCertError):

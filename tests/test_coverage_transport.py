@@ -94,7 +94,7 @@ def test_open_socket_error_paths(monkeypatch):
     monkeypatch.setattr(transport, "_resolver", lambda *a: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 1))])
     with pytest.raises(TransportError):
         transport._open_socket("x", 1, deadline, event)
-    sock = SimpleNamespace(connect=lambda _addr: (_ for _ in ()).throw(socket.timeout()), close=lambda: None, settimeout=lambda _x: None)
+    sock = SimpleNamespace(connect=lambda _addr: (_ for _ in ()).throw(TimeoutError()), close=lambda: None, settimeout=lambda _x: None)
     transport._socket_factory = lambda *a: sock
     with pytest.raises(TransportError):
         transport._open_socket("x", 1, deadline, None)

@@ -1,6 +1,6 @@
 """Compatibility tests for the standalone Java-client sandbox.
 
-These exercise the wire details the Java client depends on rather than pyCert's
+These exercise the wire details the Java client depends on rather than pyCertWiz's
 own client: OpenCA error documents with two <text> elements, chunked request
 bodies, renewal on /CSR, the /CA version document, and the admin API.
 """
@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from pycert.compat import not_valid_after, not_valid_before
+from pycert.certs import not_valid_after, not_valid_before
 from pycert.csr import build_csr
 from sandbox_ca.java_kit import _CLASS_PATH, _CONFIG_PATH, _OLD_PINS, build_jar_kit
 from sandbox_ca.mock_ca import CSRRecord, MockCA, _spki_b64
@@ -253,7 +253,7 @@ def test_persisted_hierarchy_survives_a_restart(tmp_path):
     second = SandboxCA(data_dir=data_dir, port=0, auto_approve=False)
     try:
         assert (second.info()["root_sha256"], second.info()["issuing_sha256"]) == first_pins
-        assert second.info()["issuer_dn"].startswith("CN=pyCert Test Issuing CA")
+        assert second.info()["issuer_dn"].startswith("CN=pyCertWiz Test Issuing CA")
         # The TLS leaf is allowed to rotate; the trust anchors must not.
         assert hashlib.sha256(second.server_cert.public_bytes(serialization.Encoding.DER)).digest()
     finally:
@@ -370,7 +370,7 @@ def test_admin_ui_requires_the_token_and_renders_the_dashboard(sandbox):
     assert b"Admin token" in body
     status, _, body = _request(sandbox, "GET", "/__sandbox__/ui?token=test-token")
     assert status == 200
-    assert b"pyCert sandbox CA" in body
+    assert b"pyCertWiz sandbox CA" in body
     assert b"Certificate requests" in body
 
 

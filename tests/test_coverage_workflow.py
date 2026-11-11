@@ -411,8 +411,10 @@ def test_export_bad_filename_and_renewal_failure(ctx, issued, config, monkeypatc
             workflow.export_p12(ctx, state)
     finally:
         config.p12.filename_template = original
+    real_lookup = ctx.client().lookup_public_key
     monkeypatch.setattr(ctx, "client", lambda: SimpleNamespace(
         ping=lambda: True,
+        lookup_public_key=real_lookup,
         submit_authenticated=lambda **k: (_ for _ in ()).throw(PyCertError("fail")),
     ))
     with pytest.raises(PyCertError):

@@ -151,7 +151,7 @@ def test_empty_secret_is_refused(tmp_path):
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS keychain")
 def test_keychain_roundtrip(tmp_path):
-    store = SecretStore(SecretConfig(backend="keychain", service="pyCert-pytest-deep"), tmp_path, "test")
+    store = SecretStore(SecretConfig(backend="keychain", service="pyCertWiz-pytest-deep"), tmp_path, "test")
     value = generate_secret()
     store.set(value, "probe")
     assert store.get("probe") == value

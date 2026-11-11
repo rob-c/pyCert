@@ -13,7 +13,7 @@ _DASHBOARD = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pyCert sandbox CA</title>
+<title>pyCertWiz sandbox CA</title>
 <style>
   :root { color-scheme: light dark; --line: #8884; --accent: #2b6cb0; --ok: #276749; --bad: #9b2c2c; }
   body { font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #17202a; }
@@ -50,7 +50,7 @@ _DASHBOARD = """<!doctype html>
 </head>
 <body>
 <header>
-  <div><h1>pyCert sandbox CA</h1><div class="muted" id="server-url"></div></div>
+  <div><h1>pyCertWiz sandbox CA</h1><div class="muted" id="server-url"></div></div>
   <div class="row"><span class="muted" id="clock"></span><button id="refresh">Refresh</button></div>
 </header>
 <div id="error" class="error"></div>
@@ -206,10 +206,10 @@ setInterval(refresh, 3000);
 
 _LOGIN = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pyCert sandbox CA login</title>
+<title>pyCertWiz sandbox CA login</title>
 <style>body{font:14px system-ui,sans-serif;max-width:34rem;margin:10vh auto;padding:1rem}input,button{padding:.5rem;margin:.3rem 0;width:100%;box-sizing:border-box}label{display:block;margin-top:1rem}</style>
 </head><body>
-<h1>pyCert sandbox CA</h1>
+<h1>pyCertWiz sandbox CA</h1>
 <p>Enter the admin token printed when the sandbox started (also in <code>sandbox.json</code>).</p>
 __ERROR__
 <form method="get" action="/__sandbox__/ui">
