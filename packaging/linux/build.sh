@@ -36,7 +36,7 @@ uv python install "$PYTHON_VERSION"
 rm -rf "$OUT" && mkdir -p "$OUT"
 uv venv --python "$PYTHON_VERSION" "$OUT/venv"
 . "$OUT/venv/bin/activate"
-uv pip install "pyinstaller>=6.10" "$ROOT[gui,keyring]"
+uv pip install --only-binary cryptography "pyinstaller>=6.10" "$ROOT[gui,keyring]"
 
 version=$(python -c 'from importlib.metadata import version; print(version("pyCertWiz"))')
 QT_QPA_PLATFORM=offscreen python "$ROOT/packaging/make_icons.py" "$OUT/icons"

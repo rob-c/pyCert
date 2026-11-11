@@ -1673,6 +1673,9 @@ def _dispose(dialog: QWidget) -> None:
 
 
 def create_application(argv: "list[str] | None" = None) -> QApplication:
+    from . import protect_none
+
+    protect_none()
     existing = QApplication.instance()
     if existing is not None and existing.property("pycert_ready"):
         return existing

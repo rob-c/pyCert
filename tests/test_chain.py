@@ -15,7 +15,7 @@ from pycert.errors import ChainError
 
 def _self_signed(name="Test Root", key=None, *, days=3650, ca=True):
     key = key or rsa.generate_private_key(65537, 2048)
-    now = dt.datetime.now(dt.UTC)
+    now = dt.datetime.now(dt.timezone.utc)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
     cert = (
         x509.CertificateBuilder()
@@ -53,7 +53,7 @@ def test_wrong_anchor_is_not_trusted():
 def test_missing_issuer_is_reported():
     root_key, root = _self_signed("Root")
     key = ec.generate_private_key(ec.SECP256R1())
-    now = dt.datetime.now(dt.UTC)
+    now = dt.datetime.now(dt.timezone.utc)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "leaf")])
     leaf = (
         x509.CertificateBuilder()
@@ -76,7 +76,7 @@ def test_forged_issuer_is_rejected():
     """A certificate with the right subject but the wrong key must not be used."""
     root_key, root = _self_signed("Root")
     other_key, other = _self_signed("Root")  # same subject, different key
-    now = dt.datetime.now(dt.UTC)
+    now = dt.datetime.now(dt.timezone.utc)
     leaf_key = rsa.generate_private_key(65537, 2048)
     leaf = (
         x509.CertificateBuilder()
@@ -96,7 +96,7 @@ def test_forged_issuer_is_rejected():
 def test_expired_intermediate_anchor_is_not_trusted():
     """An intermediate configured as an anchor is still validity-checked."""
     root_key, root = _self_signed("Root")
-    now = dt.datetime.now(dt.UTC)
+    now = dt.datetime.now(dt.timezone.utc)
     intermediate_key = ec.generate_private_key(ec.SECP256R1())
     intermediate = (
         x509.CertificateBuilder()
@@ -127,7 +127,7 @@ def test_expired_intermediate_anchor_is_not_trusted():
 
 def test_expired_leaf_breaks_trust():
     key, root = _self_signed("Root")
-    now = dt.datetime.now(dt.UTC)
+    now = dt.datetime.now(dt.timezone.utc)
     leaf_key = rsa.generate_private_key(65537, 2048)
     leaf = (
         x509.CertificateBuilder()

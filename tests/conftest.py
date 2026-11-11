@@ -15,6 +15,24 @@ from pycert.workflow import AppContext  # noqa: E402
 from sandbox_ca.mock_ca import MockCA  # noqa: E402
 
 
+def pytest_configure(config):
+    """With PYCERT_CRASH_DIR set, a native crash (e.g. in Qt) leaves a traceback per worker.
+
+    pytest-xdist loses a crashed worker's stderr, so CI points faulthandler at a file.
+    """
+    from pycert.gui import protect_none
+
+    protect_none()  # as the application does: PySide6 leaks references to None on Python < 3.12
+    directory = os.environ.get("PYCERT_CRASH_DIR")
+    if directory:
+        import faulthandler
+
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+        config._pycert_crash_log = open(Path(directory) / f"{worker}.log", "w")  # noqa: SIM115 - open until exit
+        faulthandler.enable(file=config._pycert_crash_log, all_threads=True)
+
+
 @pytest.fixture(autouse=True)
 def _never_touch_the_real_store(tmp_path_factory, monkeypatch):
     """No test may write to (or read) the user's real pyCertWiz data directory.

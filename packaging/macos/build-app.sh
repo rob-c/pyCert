@@ -16,7 +16,14 @@ ARCH=$(uname -m)
 rm -rf "$BUILD" && mkdir -p "$BUILD" "$DIST"
 "$PYTHON" -m venv "$BUILD/venv"
 "$BUILD/venv/bin/python" -m pip install --quiet --upgrade pip
-"$BUILD/venv/bin/python" -m pip install --quiet "pyinstaller>=6.10" "$ROOT[gui,keyring]"
+# cryptography must come as a wheel: its wheels link OpenSSL statically. A
+# source build links Homebrew's libssl.3.dylib, which clashes with Python's own
+# copy in the bundle. Since 49.0 there are no Intel macOS wheels, so the Intel
+# app uses the 48.x series (the last with a universal2 wheel).
+: >"$BUILD/constraints.txt"
+if [ "$ARCH" = x86_64 ]; then echo "cryptography<49" >"$BUILD/constraints.txt"; fi
+"$BUILD/venv/bin/python" -m pip install --quiet --only-binary=cryptography -c "$BUILD/constraints.txt" \
+    "pyinstaller>=6.10" "$ROOT[gui,keyring]"
 VERSION=$("$BUILD/venv/bin/python" -c 'from importlib.metadata import version; print(version("pyCertWiz"))')
 
 QT_QPA_PLATFORM=offscreen "$BUILD/venv/bin/python" "$ROOT/packaging/make_icons.py" "$BUILD/icons"

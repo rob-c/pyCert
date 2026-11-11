@@ -53,7 +53,11 @@ jobs:
       - name: Tests (coverage is combined across every job below)
         env:
           COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python }}
+          PYCERT_CRASH_DIR: ${{ runner.temp }}/crash
         run: pytest -n auto --cov=src/pycert --cov-report= --cov-fail-under=0
+      - name: Tracebacks of crashed test workers
+        if: failure()
+        run: for f in "$RUNNER_TEMP"/crash/*.log; do [ -s "$f" ] && { echo "== $f"; cat "$f"; }; done; true
       - run: pycert selftest
       - run: pycertwiz --version
       - uses: actions/upload-artifact@v4

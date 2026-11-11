@@ -134,7 +134,7 @@ def test_pppk_response_verifies_with_public_key():
     numbers = key.public_key().public_numbers()
     keyid = f"{numbers.n:x}.{numbers.e:x}"
     nonce = "Tm9uY2UtMTIzNDU2Nzg5MA=="
-    stamp = int(dt.datetime.now(dt.UTC).timestamp() * 1000)
+    stamp = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
     response = pppk_response(key, "realm", nonce, keyid, timestamp_ms=stamp)
     recovered = pow(int(response, 16), numbers.e, numbers.n)
     hexdigits = format(recovered, "x")

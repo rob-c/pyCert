@@ -30,6 +30,11 @@ read from the bundle's own symbol versions and declared as a dependency, so a
 package refuses to install on a system too old to run it instead of failing at
 start-up.
 
+`cryptography` is always installed from its wheels, which link OpenSSL
+statically. Since 49.0 it publishes no Intel macOS wheels, so the Intel `.dmg`
+uses the 48.x series; the Apple silicon `.dmg` and every other package use the
+current release.
+
 ## Building locally
 
 ```console

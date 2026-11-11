@@ -17,7 +17,7 @@ Security notes:
 import os
 import sys
 
-__all__ = ["gui_available", "main", "run_gui"]
+__all__ = ["gui_available", "main", "protect_none", "run_gui"]
 
 INSTALL_HINT = "install the GUI extra: pip install 'pyCertWiz[gui]' (PySide6)"
 #: In a packaged pyCertWiz (AppImage, .deb, .rpm, macOS app) Qt is bundled; what
@@ -27,6 +27,40 @@ BUNDLED_HINT = (
     "xcb-util-cursor (e.g. 'apt install libegl1 libxkbcommon-x11-0 libxcb-cursor0' or "
     "'dnf install mesa-libEGL libxkbcommon-x11 xcb-util-cursor'). The pycertwiz command line works without them"
 )
+
+
+def _raise_refcount(obj: object, amount: int) -> bool:
+    """Add *amount* to *obj*'s CPython reference count, if its layout is the expected one."""
+    import ctypes
+
+    cell = ctypes.c_ssize_t.from_address(id(obj))
+    # getrefcount() counts its own argument up to Python 3.13, not from 3.14.
+    count = sys.getrefcount(obj)
+    if cell.value not in (count, count - 1):  # not a layout we know (e.g. a debug build)
+        return False
+    cell.value += amount
+    return True
+
+
+_none_protected = False
+
+
+def protect_none() -> bool:
+    """Stop PySide6 from wearing out ``None`` on Python 3.10 and 3.11.
+
+    PySide6 (6.8 to 6.12 at least) drops a reference to ``None`` it never took
+    each time a model index has no data for a role, which happens many times
+    per repaint. Python 3.12 made ``None`` immortal (PEP 683), so the bug goes
+    unnoticed there; on 3.10 and 3.11 the count reaches zero after a while and
+    the interpreter aborts ("Fatal Python error: none_dealloc"). ``None`` is a
+    static object that is never freed, so giving it a very large count, as
+    Python 3.12 does, is safe. Returns True when the count was raised.
+    """
+    global _none_protected
+    if _none_protected or sys.version_info >= (3, 12) or sys.implementation.name != "cpython":
+        return False
+    _none_protected = _raise_refcount(None, 1 << 40)
+    return _none_protected
 
 
 def gui_available() -> "str | None":

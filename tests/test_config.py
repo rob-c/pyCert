@@ -1,8 +1,13 @@
 import stat
+import sys
 from pathlib import Path
 
 import pytest
-import tomllib
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # Python 3.10
+    import tomli as tomllib
 
 from pycert.config import (
     ChainEntry,

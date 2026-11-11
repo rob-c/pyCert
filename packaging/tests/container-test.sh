@@ -9,8 +9,9 @@
 #   packaging/tests/container-test.sh almalinux:8 appimage
 #   SMOKE_X11=1 packaging/tests/container-test.sh fedora:latest rpm
 #
-# FORMAT: deb, rpm, archlinux or appimage; DIST (default dist/) holds the
-# packages for this machine's architecture.
+# FORMAT: deb, rpm, archlinux or appimage; DIST (default dist/, inside the
+# repository) holds the packages. PLATFORM (e.g. linux/amd64) runs another
+# architecture's packages under emulation.
 set -eu
 
 IMAGE=$1
@@ -19,6 +20,7 @@ DIST=${3:-dist}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 id=pycw-$$-$(date +%s)
+platform=${PLATFORM:+--platform=$PLATFORM}
 sandbox_dir=build/sandbox-$id
 cleanup() {
     docker rm -f "$id-ca" >/dev/null 2>&1 || true
@@ -30,7 +32,7 @@ mkdir -p build
 docker network create "$id" >/dev/null
 
 # The sandbox CA (the repository's sandbox_ca, needing only 'cryptography').
-docker run -d --name "$id-ca" --network "$id" --network-alias sandbox-ca \
+docker run -d $platform --name "$id-ca" --network "$id" --network-alias sandbox-ca \
     -v "$ROOT:/src:ro" -v "$ROOT/build:/build" -w /src -e PYTHONPATH=/src/src python:3.13-slim \
     sh -c "pip install -q --root-user-action=ignore 'cryptography>=42' && exec python -m sandbox_ca \
         --host 0.0.0.0 --port 8443 --public-host sandbox-ca --data-dir /build/sandbox-$id --sign-after-polls 0" >/dev/null
@@ -44,6 +46,6 @@ for _ in $(seq 120); do
 done
 [ -f "$sandbox_dir/sandbox.json" ] || { echo "the sandbox CA did not start" >&2; docker logs "$id-ca"; exit 1; }
 
-docker run --rm --network "$id" -e SMOKE_X11="${SMOKE_X11:-0}" \
+docker run --rm $platform --network "$id" -e SMOKE_X11="${SMOKE_X11:-0}" \
     -v "$ROOT:/src:ro" -v "$ROOT/build:/build:ro" -w /src "$IMAGE" \
     packaging/tests/install-and-smoke.sh "$FORMAT" "/src/$DIST" "/build/sandbox-$id" https://sandbox-ca:8443

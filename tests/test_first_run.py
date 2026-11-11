@@ -1,5 +1,7 @@
 """First run: no configuration yet. 'pycert init' and the GUI set pyCertWiz up the same way."""
 
+import sys
+
 import pytest
 
 from pycert import secrets_store
@@ -164,3 +166,45 @@ def test_gui_check_before_setup(setup_module, fresh_home, capsys, monkeypatch):
     monkeypatch.setattr(setup_module.SetupDialog, "grab", lambda self: QPixmap())
     assert gui_main(["--check"]) == 1
     assert "the first-run setup did not render" in capsys.readouterr().err
+
+
+# -- PySide6 and None on Python 3.10/3.11 ---------------------------------------
+
+
+def test_raise_refcount():
+    from pycert.gui import _raise_refcount
+
+    target = object()
+    before = sys.getrefcount(target)
+    assert _raise_refcount(target, 5)
+    assert sys.getrefcount(target) == before + 5
+    assert _raise_refcount(target, -5)
+    assert sys.getrefcount(target) == before
+
+
+def test_raise_refcount_refuses_an_unknown_layout(monkeypatch):
+    import pycert.gui as gui
+
+    monkeypatch.setattr(gui.sys, "getrefcount", lambda obj: -42)
+    assert gui._raise_refcount(object(), 5) is False
+
+
+def test_protect_none(monkeypatch):
+    import types
+
+    import pycert.gui as gui
+
+    calls = []
+    monkeypatch.setattr(gui, "_raise_refcount", lambda obj, amount: calls.append((obj, amount)) or True)
+    monkeypatch.setattr(gui, "_none_protected", False)
+    # Python 3.12+ (None is immortal) and other implementations: nothing to do
+    monkeypatch.setattr(gui, "sys", types.SimpleNamespace(version_info=(3, 12), implementation=types.SimpleNamespace(name="cpython")))
+    assert gui.protect_none() is False
+    monkeypatch.setattr(gui, "sys", types.SimpleNamespace(version_info=(3, 11), implementation=types.SimpleNamespace(name="pypy")))
+    assert gui.protect_none() is False
+    assert calls == []
+    # CPython 3.10/3.11: once
+    monkeypatch.setattr(gui, "sys", types.SimpleNamespace(version_info=(3, 11), implementation=types.SimpleNamespace(name="cpython")))
+    assert gui.protect_none() is True
+    assert gui.protect_none() is False
+    assert calls == [(None, 1 << 40)]
