@@ -43,6 +43,27 @@ a = Analysis(
     ],
     noarchive=False,
 )
+if sys.platform.startswith("linux"):
+    # Libraries every Linux desktop has, which read the host's configuration or
+    # meet its graphics drivers, come from the host, as AppImage guidelines
+    # advise: an older bundled fontconfig cannot parse newer distributions'
+    # font configuration, and an older libstdc++ breaks newer Mesa drivers.
+    # The .deb and .rpm packages recommend them; the command line needs none.
+    HOST_LIBRARIES = (
+        "libfontconfig.so",
+        "libfreetype.so",
+        "libharfbuzz.so",
+        "libgraphite2.so",
+        "libpng16.so",
+        "libbrotlicommon.so",
+        "libbrotlidec.so",
+        "libbz2.so",
+        "libexpat.so",
+        "libstdc++.so",
+        "libgcc_s.so",
+    )
+    a.binaries = [entry for entry in a.binaries if not os.path.basename(entry[0]).startswith(HOST_LIBRARIES)]
+
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

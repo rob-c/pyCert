@@ -44,6 +44,8 @@ elif command -v zypper >/dev/null; then
     desktop="Mesa-libEGL1 Mesa-libGL1 libxkbcommon-x11-0 fontconfig dejavu-fonts libdbus-1-3 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0"
     xvfb=xvfb-run
 elif command -v pacman >/dev/null; then
+    # pacman's download sandbox needs seccomp, which emulated containers lack.
+    pacman() { command pacman --disable-sandbox "$@"; }
     pacman -Sy --noconfirm --needed archlinux-keyring >/dev/null
     install_os() { pacman -S --noconfirm --needed "$@"; }
     desktop="libglvnd libxkbcommon-x11 fontconfig ttf-dejavu dbus xcb-util-cursor xcb-util-image xcb-util-keysyms xcb-util-renderutil xcb-util-wm"

@@ -25,7 +25,11 @@ nothing from the system but glibc. The GUI also needs the desktop libraries
 every graphical system has: EGL/OpenGL, xkbcommon, fontconfig, D-Bus and the
 xcb utility libraries. The `.deb` and `.rpm` packages *recommend* them (the
 `.rpm` by library name, so the same package resolves on Fedora, RHEL and
-openSUSE), and the Arch package lists them as optional. The minimum glibc is
+openSUSE), and the Arch package lists them as optional. Following the AppImage
+guidelines, fontconfig, FreeType, HarfBuzz and the C++ runtime are left out of
+the bundle and come from the host: an older bundled fontconfig cannot read
+newer distributions' font configuration, and an older libstdc++ breaks newer
+graphics drivers ([pycertwiz.spec](../packaging/pycertwiz.spec)). The minimum glibc is
 read from the bundle's own symbol versions and declared as a dependency, so a
 package refuses to install on a system too old to run it instead of failing at
 start-up.
