@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Every request to the UK CA looked up this computer's full name for the
+  `LocalHost` header, a reverse DNS lookup that takes seconds where reverse
+  DNS is slow. It is now looked up once per run. On GitHub's macOS runners
+  this made the test suite crawl until it timed out.
+
 ## 2.0.0
 
 **pyCert is now pyCertWiz.** The distribution (`pip install pyCertWiz`), the

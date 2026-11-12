@@ -31,6 +31,7 @@ Security properties pyCertWiz adds on top of the Java client:
 """
 
 import base64
+import functools
 import socket
 import time
 import xml.etree.ElementTree as ET
@@ -251,7 +252,14 @@ class CAClient:
 
     # -- helpers -----------------------------------------------------------
     @staticmethod
+    @functools.lru_cache(maxsize=1)
     def local_host_header() -> str:
+        """This computer's name, sent as CertWizard's LocalHost header.
+
+        Looked up once per process: getfqdn() does a reverse DNS lookup, which
+        takes seconds where reverse DNS is slow (GitHub's macOS runners, many
+        laptops on hotel networks), and the name does not change mid-run.
+        """
         try:
             return socket.getfqdn()
         except OSError:  # pragma: no cover

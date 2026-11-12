@@ -30,6 +30,7 @@ concurrency:
 jobs:
   python:
     name: Wheel and sdist
+    timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +58,7 @@ jobs:
 
   linux:
     name: Linux ${{ matrix.arch }} build
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +85,7 @@ jobs:
 
   linux-test:
     name: ${{ matrix.format }} on ${{ matrix.image }} ${{ matrix.arch }}
+    timeout-minutes: 30
     needs: linux
     strategy:
       fail-fast: false
@@ -119,6 +122,7 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.arch }} (.app, .dmg)
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -149,6 +153,7 @@ jobs:
 
   nix:
     name: Nix flake
+    timeout-minutes: 60
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
