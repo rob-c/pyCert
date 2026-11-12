@@ -4,7 +4,7 @@
 #
 #   APP_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 #   NOTARY_PROFILE=pycertwiz-notary \
-#   packaging/macos/sign-and-notarize.sh dist/pyCertWiz-2.0.1-macos-arm64.dmg
+#   packaging/macos/sign-and-notarize.sh dist/pyCertWiz-2.0.2-macos-arm64.dmg
 #
 # The argument is a .dmg from build-app.sh or the CI artifacts; the signed and
 # notarized copy is written next to it as ...-signed.dmg. Store notarization

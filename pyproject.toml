@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyCertWiz"
-version = "2.0.1"
+version = "2.0.2"
 description = "Certificate manager for the UK e-Science CA and ACME CAs: request, track, renew, deploy and export user and host certificates (a CertWizard replacement)"
 readme = "README.md"
 license = "GPL-2.0-or-later"

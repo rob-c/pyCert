@@ -106,7 +106,7 @@ The packages add `pycertwiz` and `pycert` commands and a pyCertWiz entry in
 the applications menu. The first time it opens, the desktop application asks
 a few questions and sets itself up (see [Quick start](#quick-start)). The
 AppImage is the command line when given arguments:
-`./pyCertWiz-2.0.1-x86_64.AppImage renew --due 30`.
+`./pyCertWiz-2.0.2-x86_64.AppImage renew --due 30`.
 
 The x86_64 Linux packages run on glibc 2.28 and newer (RHEL 8, Debian 10,
 Ubuntu 20.04 onwards). The aarch64 packages need glibc 2.39 (Ubuntu 24.04,

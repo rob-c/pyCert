@@ -11,5 +11,5 @@ orchestration lives in :mod:`pycert.workflow` and CA protocols live behind the
 provider interface in :mod:`pycert.providers`.
 """
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 __all__ = ["__version__"]
