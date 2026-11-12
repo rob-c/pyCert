@@ -228,5 +228,11 @@ class MainThreadCollector(QObject):
 
     def stop(self) -> None:
         self.timer.stop()
+        # Free what is pending now, on the UI thread, before automatic collection
+        # resumes. Otherwise it can run inside a Qt destructor: on Python < 3.12
+        # PySide allocates there (a failed override lookup raises AttributeError),
+        # and a collection that then destroys more Qt objects deadlocks on Qt's
+        # signal-slot locks.
+        gc.collect()
         if self.was_enabled:
             gc.enable()

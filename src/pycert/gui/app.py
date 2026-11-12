@@ -150,9 +150,13 @@ class Prompter(QObject):
 
 class MainWindow(QMainWindow):
     def __init__(self, config_path: "str | None" = None, *, start_background: bool = True):
+        # Load the configuration before the Qt window exists: when it fails (e.g. on
+        # a first run), the exception's traceback must not keep a half-built window
+        # alive until some later garbage collection destroys it at a bad moment.
+        cfg = load_config(config_path)
         super().__init__()
         self.config_path = config_path
-        self.cfg = load_config(config_path)
+        self.cfg = cfg
         self.ctx = AppContext.from_config(self.cfg)
         self.runner = TaskRunner(self)
         self.prompter = Prompter(self)
