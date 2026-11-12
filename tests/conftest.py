@@ -33,6 +33,30 @@ def pytest_configure(config):
         faulthandler.enable(file=config._pycert_crash_log, all_threads=True)
 
 
+#: With PYCERT_CRASH_DIR set, a test running longer than this is taken to hang.
+TEST_TIME_LIMIT = 240
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Watchdog: a hung test leaves every thread's stack and fails, instead of stalling CI.
+
+    The worker writes the stacks to its crash log and exits; pytest-xdist reports
+    the test as crashed, starts a new worker and carries on.
+    """
+    log = getattr(item.config, "_pycert_crash_log", None)
+    if log is None:
+        yield
+        return
+    import faulthandler
+
+    faulthandler.dump_traceback_later(TEST_TIME_LIMIT, exit=True, file=log)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
 @pytest.fixture(autouse=True)
 def _never_touch_the_real_store(tmp_path_factory, monkeypatch):
     """No test may write to (or read) the user's real pyCertWiz data directory.
