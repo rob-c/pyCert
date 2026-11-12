@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The desktop application could hang on Python 3.10 and 3.11 when windows
+  were destroyed, for example on quitting or after a first-run setup: Python's
+  garbage collector could start inside a Qt destructor and deadlock on Qt's
+  own locks. Pending garbage is now collected at a safe point first, and a
+  window that fails to open (for example with no configuration yet) leaves
+  nothing behind. The packaged builds (Python 3.13) were not affected.
+
 ## 2.0.1
 
 ### Fixed
